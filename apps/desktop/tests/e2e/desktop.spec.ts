@@ -262,6 +262,131 @@ async function installPlatform(accountId: string, slow?: 'identity' | 'page') {
           )
         }
         let body: unknown
+        if (
+          (globalThis as any).__favoriteMassIds &&
+          [
+            '/aweme/v1/web/aweme/listcollection/',
+            '/aweme/v1/web/collects/list/',
+            '/aweme/v1/web/collects/video/list/'
+          ].includes(url.pathname)
+        ) {
+          const rows = (globalThis as any).__favoriteMassIds as string[]
+          if (url.pathname.includes('/collects/list/'))
+            return Response.json({
+              status_code: 0,
+              collects_list: [{ collects_id: '8', collects_name: '保留夹', aweme_count: 20 }],
+              has_more: 0,
+              cursor: '0'
+            })
+          return Response.json({
+            status_code: 0,
+            aweme_list: (url.pathname.includes('/collects/video/list/') ? rows.slice(0, 20) : rows).map(
+              (id) => ({ aweme_id: id, desc: `批量收藏 ${id}`, author: { nickname: '测试作者' } })
+            ),
+            has_more: 0,
+            cursor: '0'
+          })
+        }
+        if (url.pathname === '/aweme/v1/web/aweme/cancel/collect/multi/') {
+          const form = new URLSearchParams(await request.text())
+          ;((globalThis as any).__bulkFavoriteWrites ??= []).push({
+            method: request.method,
+            ids: form.get('aweme_ids')!.split(','),
+            types: JSON.parse(form.get('aweme_type_map')!)
+          })
+          return Response.json({ status_code: 0, fatal_ids: [] })
+        }
+        if (url.pathname === '/aweme/v1/web/cancel/item/digg/multi/') {
+          const form = new URLSearchParams(await request.text())
+          ;((globalThis as any).__bulkLikeWrites ??= []).push({
+            method: request.method,
+            ids: form.get('aweme_ids')!.split(','),
+            types: JSON.parse(form.get('item_type_map')!),
+            query: Object.fromEntries(url.searchParams)
+          })
+          if ((globalThis as any).__rejectLikeOnce) {
+            ;(globalThis as any).__rejectLikeOnce = false
+            return Response.json({ status_code: 0, fatal_ids: [form.get('aweme_ids')!.split(',')[0]] })
+          }
+          return Response.json({ status_code: 0, fatal_ids: [] })
+        }
+        if (url.pathname === '/aweme/v1/web/commit/item/digg/' && (globalThis as any).__typedLikeRetry) {
+          const form = new URLSearchParams(await request.text())
+          ;((globalThis as any).__typedLikeWrites ??= []).push(Object.fromEntries(form))
+          return Response.json({ status_code: 0, is_digg: 0 })
+        }
+        if (url.pathname === '/aweme/v1/web/familiar/recommend/feed/') {
+          const globals = globalThis as any
+          const rows = (globals.__recommendedRows ??= [
+            workId,
+            String(BigInt(workId) + 10n),
+            String(BigInt(workId) + 11n),
+            String(BigInt(workId) + 12n)
+          ]) as string[]
+          const offset = url.searchParams.get('max_cursor') === '0' ? 0 : 2
+          return Response.json({
+            status_code: 0,
+            aweme_list: rows.slice(offset, offset + 2).map((id) => ({
+              aweme_id: id,
+              desc: `推荐作品 ${id}`,
+              author: { nickname: '推荐作者' },
+              user_recommend_status: 1
+            })),
+            has_more: offset === 0 && rows.length > 2 ? 1 : 0,
+            max_cursor: offset === 0 && rows.length > 2 ? '9007199254740993988' : '0'
+          })
+        }
+        if (url.pathname === '/aweme/v1/web/familiar/recommend/cancel') {
+          const globals = globalThis as any
+          const form = new URLSearchParams(await request.text())
+          ;(globals.__recommendWrites ??= []).push({
+            method: request.method,
+            body: Object.fromEntries(form),
+            query: Object.fromEntries(url.searchParams)
+          })
+          globals.__recommendedRows = globals.__recommendedRows.filter(
+            (id: string) => id !== form.get('item_id')
+          )
+          return Response.json({ status_code: 0 })
+        }
+        if (
+          ['/aweme/v1/web/mix/listcollection/', '/aweme/v1/web/series/collections/'].includes(url.pathname)
+        ) {
+          const kind = url.pathname.includes('/mix/') ? 'mix' : 'series'
+          const globals = globalThis as any
+          const groups = (globals.__savedGroupRows ??= {})
+          const rows = (groups[kind] ??= ['9007199254740993999', '2', '3']) as string[]
+          const offset = url.searchParams.get('cursor') === '0' ? 0 : 2
+          return Response.json({
+            status_code: 0,
+            [kind === 'mix' ? 'mix_infos' : 'series_infos']: rows.slice(offset, offset + 2).map((id) => ({
+              [kind + '_id']: id,
+              [kind + '_name']: `${kind === 'mix' ? '测试合集' : '测试短剧'} ${id}`,
+              author: { nickname: '测试作者' },
+              [kind === 'mix' ? 'statis' : 'stats']: { updated_to_episode: 12 }
+            })),
+            cursor: offset === 0 && rows.length > 2 ? '9007199254740993988' : '0',
+            has_more: offset === 0 && rows.length > 2 ? 1 : 0
+          })
+        }
+        if (
+          ['/aweme/v1/web/mix/cancel/collect/multi/', '/aweme/v1/web/series/cancel/collect/multi/'].includes(
+            url.pathname
+          )
+        ) {
+          const kind = url.pathname.includes('/mix/') ? 'mix' : 'series'
+          const form = new URLSearchParams(await request.text())
+          const globals = globalThis as any
+          ;(globals.__savedGroupWrites ??= []).push({
+            kind,
+            method: request.method,
+            body: Object.fromEntries(form),
+            query: Object.fromEntries(url.searchParams)
+          })
+          const id = form.get(kind + '_ids')
+          globals.__savedGroupRows[kind] = globals.__savedGroupRows[kind].filter((row: string) => row !== id)
+          return Response.json({ status_code: 0, fatal_ids: [] })
+        }
         if (url.pathname.startsWith('/video/'))
           return new Response('<html><body>受控作品原页；没有真实评论操作。</body></html>', {
             headers: { 'content-type': 'text/html; charset=utf-8' }
@@ -535,6 +660,14 @@ async function installPlatform(accountId: string, slow?: 'identity' | 'page') {
                 : {})
             }
           }
+          if ((globalThis as any).__typedLikeRetry === 'unavailable')
+            body = {
+              status_code: 0,
+              aweme_detail: null,
+              filter_detail: { aweme_id: detailId, filter_reason: 'status_self_see' }
+            }
+          else if ((globalThis as any).__typedLikeRetry)
+            Object.assign((body as any).aweme_detail, { user_digged: 1, aweme_type: 107 })
           if ((globalThis as any).__favoriteUnavailableDetail === detailId)
             body = {
               status_code: 0,
@@ -918,6 +1051,46 @@ test('rejects hostile command parameters and calls from another renderer', async
     }
   }, preload)
   expect(foreign).toMatchObject({ ok: false, error: { code: 'FORBIDDEN' } })
+})
+
+test('fast scans reuse the hidden session identity and resume the saved cursor after restart', async () => {
+  const accountId = await addAccount()
+  await installPlatform(accountId)
+  await app.evaluate(() => {
+    ;(globalThis as any).__mylikeLongCollection = true
+  })
+  await page.getByRole('button', { name: '向下采集', exact: true }).click()
+  await expect
+    .poll(async () => (await invoke('snapshot')).data.collection?.pages, { timeout: 30000 })
+    .toBeGreaterThanOrEqual(8)
+  await page.getByRole('button', { name: '停止', exact: true }).click()
+  await expect.poll(async () => (await invoke('snapshot')).data.collection?.status).toBe('stopped')
+  const saved = (await invoke('snapshot')).data.collection
+  const calls = await app.evaluate(() => (globalThis as any).__mylikeTestCalls as string[])
+  const identities = calls.filter((url) => url.includes('/profile/self/')).length
+  const reads = calls.filter((url) => url.includes('/aweme/favorite/')).length
+  expect(identities).toBeLessThan(reads)
+  expect(identities).toBeLessThanOrEqual(3)
+  await app.close()
+  await launch()
+  expect((await invoke('snapshot')).data.collection).toMatchObject({
+    cursor: saved.cursor,
+    added: saved.added,
+    status: 'stopped'
+  })
+  await installPlatform(accountId)
+  await app.evaluate(() => {
+    ;(globalThis as any).__mylikeEndCollection = true
+  })
+  await page.getByRole('button', { name: '向下采集', exact: true }).click()
+  await expect
+    .poll(async () => (await invoke('snapshot')).data.collection?.status, { timeout: 30000 })
+    .toBe('completed')
+  const resumed = await app.evaluate(() => (globalThis as any).__mylikeTestCalls as string[])
+  expect(
+    new URL(resumed.find((url) => url.includes('/aweme/favorite/'))!).searchParams.get('max_cursor')
+  ).toBe(saved.cursor)
+  expect((await invoke('query', { accountId })).data.total).toBe(saved.added)
 })
 
 test('automatically collects, pauses, restores its task after restart and plays during collection', async ({}, info) => {
@@ -3074,6 +3247,65 @@ test('synchronizes favorite folders through the page SDK, restores folder cursor
   await page.getByRole('button', { name: '喜欢', exact: true }).click()
   await expect(page.locator('.list-caption')).toContainText('3 条内容')
   expect((await invoke('libraryOverview', { accountId })).data.total).toBe(5)
+})
+
+test('views folders, inverts folder checks and protects excluded favorites during bulk removal', async ({}, info) => {
+  test.setTimeout(testTimeout(120000))
+  const { accountId } = await prepareQueue(3)
+  await page.getByRole('button', { name: '收藏', exact: true }).click()
+  await page.getByRole('button', { name: '向下采集', exact: true }).click()
+  await expect
+    .poll(async () => (await invoke('snapshot')).data.favorites, { timeout: 30000 })
+    .toMatchObject({ status: 'completed', foldersDone: 2 })
+  await page.getByRole('button', { name: '查看收藏夹', exact: true }).click()
+  const view = page.getByRole('dialog', { name: '当前收藏夹', exact: true })
+  await expect(view).toContainText('旅行')
+  await expect(view).toContainText('音乐')
+  await view.getByRole('button', { name: '完成', exact: true }).click()
+  await page.getByRole('button', { name: '批量选择', exact: true }).click()
+  await page.getByRole('button', { name: '选择全部筛选结果', exact: true }).click()
+  await expect(page.getByLabel('批量操作')).toContainText('已选 3 条')
+  await page.getByRole('button', { name: '排除收藏夹', exact: true }).click()
+  const dialog = page.getByRole('dialog', { name: '排除收藏夹', exact: true })
+  await dialog.getByRole('button', { name: '全选收藏夹', exact: true }).click()
+  await expect(dialog.getByRole('checkbox', { name: '保留 旅行', exact: true })).toBeChecked()
+  await expect(dialog.getByRole('checkbox', { name: '保留 音乐', exact: true })).toBeChecked()
+  await dialog.getByRole('button', { name: '反选收藏夹', exact: true }).click()
+  await expect(dialog.getByRole('checkbox', { name: '保留 旅行', exact: true })).not.toBeChecked()
+  await dialog.getByRole('checkbox', { name: '保留 旅行', exact: true }).check()
+  await screenshot(info.outputPath('exclude-folders-picker.png'))
+  await dialog.getByRole('button', { name: '应用排除（1 个夹）', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
+  await expect(page.getByLabel('批量操作')).toContainText('已选 1 条')
+  await expect(page.locator('.work-select:disabled')).toHaveCount(2)
+  // Selecting all again must preserve the exclusion, including hidden pages.
+  await page.getByRole('button', { name: '选择全部筛选结果', exact: true }).click()
+  await expect(page.getByLabel('批量操作')).toContainText('已选 1 条')
+  const protectedIds = (
+    await invoke('favoriteProtectedIds', { accountId, folderIds: ['9007199254740993999'] })
+  ).data
+  const rejected = await invoke('unlikeStart', {
+    accountId,
+    workIds: [protectedIds[0]],
+    mode: 'batch',
+    source: 'favorites',
+    excludedFolderIds: ['9007199254740993999']
+  })
+  expect(rejected).toMatchObject({ ok: false, error: { code: 'FOLDER_SELECTION_CHANGED' } })
+  await screenshot(info.outputPath('exclude-folders-selection.png'))
+  await page.getByRole('button', { name: '取消抖音收藏', exact: true }).click()
+  const confirm = page.getByRole('dialog', { name: '取消抖音收藏', exact: true })
+  await expect(confirm).toContainText('1 条作品')
+  await expect(confirm).toContainText('已排除 1 个保留收藏夹')
+  await confirm.getByRole('button', { name: '确认取消抖音收藏', exact: true }).click()
+  await expect
+    .poll(async () => (await invoke('snapshot')).data.unlike, { timeout: 15000 })
+    .toMatchObject({ source: 'favorites', success: 1, status: 'completed' })
+  expect((await invoke('query', { accountId, source: 'favorites' })).data.total).toBe(2)
+  expect(
+    (await invoke('query', { accountId, source: 'favorites', folderId: '9007199254740993999' })).data.total
+  ).toBe(2)
+  expect((await invoke('query', { accountId, source: 'likes' })).data.total).toBe(3)
 })
 
 test('pauses favorite sync on rate limits without changing likes or blindly retrying', async () => {
@@ -6591,3 +6823,262 @@ test('fills missing like order from Douyin and uses it for sequential playback',
     .toMatchObject({ work: { id: ids[0] }, next: { id: ids[1] }, total: 4 })
   expect((await invoke('query', { accountId, sort: 'liked' })).data.unrankedLikes).toBe(0)
 })
+
+for (const [kind, label] of [
+  ['mix', '合集'],
+  ['series', '短剧']
+] as const) {
+  test(`lists saved ${kind}, selects and inverts groups, confirms cancellation and persists without changing video records`, async ({}, info) => {
+    test.setTimeout(testTimeout(60000))
+    const { accountId } = await prepareQueue(2)
+    const overview = (await invoke('libraryOverview', { accountId })).data
+    const before = {
+      likes: overview.likes,
+      favorites: overview.favorites,
+      folders: overview.folders,
+      overlap: overview.overlap,
+      total: overview.total
+    }
+    await page.getByRole('button', { name: '收藏', exact: true }).click()
+    await page.getByRole('button', { name: `收藏${label}`, exact: true }).click()
+    await expect(page.getByText(`本地已同步 0 个${label}`, { exact: true })).toBeVisible()
+    expect(await app.evaluate(() => (globalThis as any).__savedGroupWrites ?? [])).toEqual([])
+    await page.getByRole('button', { name: '读取 / 继续同步', exact: true }).click()
+    await expect(page.getByRole('status', { name: `${label}任务` })).toContainText('已完成', {
+      timeout: 25000
+    })
+    const list = page.getByLabel(`收藏${label}列表`, { exact: true })
+    await expect(list.getByRole('checkbox')).toHaveCount(3)
+    await page.getByRole('button', { name: '全选筛选结果', exact: true }).click()
+    await expect(page.getByText(`已选 3 个${label}`, { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '反选', exact: true }).click()
+    await expect(page.getByText(`已选 0 个${label}`, { exact: true })).toBeVisible()
+    await list.getByRole('checkbox', { name: `选择${label} 测试${label} 2`, exact: true }).check()
+    await page.getByRole('button', { name: '反选', exact: true }).click()
+    await expect(page.getByText(`已选 2 个${label}`, { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: '反选', exact: true }).click()
+    await page.getByRole('button', { name: `取消所选${label}收藏`, exact: true }).click()
+    let dialog = page.getByRole('dialog', { name: `取消${label}收藏` })
+    await expect(dialog).toContainText('1 个完整')
+    await dialog.getByRole('button', { name: '取消', exact: true }).click()
+    expect(await app.evaluate(() => (globalThis as any).__savedGroupWrites ?? [])).toEqual([])
+    await screenshot(info.outputPath(`saved-${kind}-list.png`))
+    await page.getByRole('button', { name: `取消所选${label}收藏`, exact: true }).click()
+    dialog = page.getByRole('dialog', { name: `取消${label}收藏` })
+    await dialog.getByRole('button', { name: `确认取消 1 个${label}收藏`, exact: true }).click()
+    await expect(page.getByRole('status', { name: `${label}任务` })).toContainText('成功 1', {
+      timeout: 15000
+    })
+    await expect(list.getByRole('checkbox')).toHaveCount(2)
+    const writes = await app.evaluate(() => (globalThis as any).__savedGroupWrites)
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toMatchObject({ kind, method: 'POST', body: { [kind + '_ids']: '2' } })
+    expect(writes[0].query.aweme_id).toBeUndefined()
+    expect((await invoke('libraryOverview', { accountId })).data).toMatchObject(before)
+    await app.close()
+    await launch()
+    await page.getByRole('button', { name: '收藏', exact: true }).click()
+    await page.getByRole('button', { name: `收藏${label}`, exact: true }).click()
+    await expect(page.getByText(`本地已同步 2 个${label}`, { exact: true })).toBeVisible()
+    expect((await invoke('libraryOverview', { accountId })).data).toMatchObject(before)
+    const library = await invoke('savedGroupsList', { accountId, kind })
+    expect(library.data.items.map((item: any) => item.id)).toEqual(['3', '9007199254740993999'])
+  })
+}
+
+test('manages recommendations with folder inclusion and exclusion, inversions and confirmed independent cancellation', async ({}, info) => {
+  test.setTimeout(testTimeout(120000))
+  const { accountId } = await prepareQueue(3)
+  await page.getByRole('button', { name: '收藏', exact: true }).click()
+  await page.getByRole('button', { name: '向下采集', exact: true }).click()
+  await expect
+    .poll(async () => (await invoke('snapshot')).data.favorites, { timeout: 30000 })
+    .toMatchObject({ status: 'completed', foldersDone: 2 })
+  const overview = (await invoke('libraryOverview', { accountId })).data
+  const counts = {
+    likes: overview.likes,
+    favorites: overview.favorites,
+    folders: overview.folders,
+    overlap: overview.overlap
+  }
+  // The same folder chooser also selects ordinary favorite videos, with no remote writes.
+  await page.getByRole('button', { name: '批量选择', exact: true }).click()
+  await page.getByRole('button', { name: '按收藏夹选择', exact: true }).click()
+  let picker = page.getByRole('dialog', { name: '按收藏夹选择视频' })
+  await picker.getByRole('checkbox', { name: '选择收藏夹 旅行', exact: true }).check()
+  await picker.getByRole('button', { name: '选择夹内视频（1 个夹）', exact: true }).click()
+  await expect(page.getByLabel('批量操作')).toContainText('已选 2 条')
+  await page.getByRole('button', { name: '反选筛选结果', exact: true }).click()
+  await expect(page.getByLabel('批量操作')).toContainText('已选 1 条')
+  await page.getByRole('button', { name: '推荐', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '我推荐的视频', exact: true })).toBeVisible()
+  expect(await app.evaluate(() => (globalThis as any).__recommendWrites ?? [])).toEqual([])
+  await page.getByRole('button', { name: '读取 / 继续同步', exact: true }).click()
+  await expect(page.getByRole('status', { name: '推荐视频任务' })).toContainText('已完成', { timeout: 20000 })
+  const list = page.getByLabel('推荐视频列表', { exact: true })
+  await expect(list.getByRole('checkbox')).toHaveCount(4)
+  await page.getByRole('button', { name: '按收藏夹选择', exact: true }).click()
+  picker = page.getByRole('dialog', { name: '按收藏夹选择视频' })
+  await picker.getByRole('button', { name: '全选收藏夹', exact: true }).click()
+  await expect(picker.getByRole('checkbox', { name: '选择收藏夹 旅行', exact: true })).toBeChecked()
+  await expect(picker.getByRole('checkbox', { name: '选择收藏夹 音乐', exact: true })).toBeChecked()
+  await picker.getByRole('button', { name: '反选收藏夹', exact: true }).click()
+  await expect(picker.getByRole('checkbox', { name: '选择收藏夹 旅行', exact: true })).not.toBeChecked()
+  await picker.getByRole('checkbox', { name: '选择收藏夹 旅行', exact: true }).check()
+  await picker.getByRole('button', { name: '选择夹内视频（1 个夹）', exact: true }).click()
+  await expect(page.getByText('已选 2 个推荐视频', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: '反选', exact: true }).click()
+  await expect(list.locator('input:checked')).toHaveCount(2)
+  await expect(
+    list.getByRole('checkbox', { name: `选择推荐视频 推荐作品 ${workId}`, exact: true })
+  ).not.toBeChecked()
+  await page.getByRole('button', { name: '按收藏夹选择', exact: true }).click()
+  picker = page.getByRole('dialog', { name: '按收藏夹选择视频' })
+  await picker.getByRole('checkbox', { name: '选择收藏夹 旅行', exact: true }).check()
+  await picker.getByRole('button', { name: '排除夹内视频（1 个夹）', exact: true }).click()
+  await page.getByRole('button', { name: '全选筛选结果', exact: true }).click()
+  await expect(page.getByText('已选 2 个推荐视频', { exact: true })).toBeVisible()
+  await expect(list.locator('input:disabled')).toHaveCount(2)
+  await screenshot(info.outputPath('recommendations-folder-exclusion.png'))
+  await page.getByRole('button', { name: '取消所选推荐', exact: true }).click()
+  let confirm = page.getByRole('dialog', { name: '取消推荐', exact: true })
+  await expect(confirm).toContainText('已排除 1 个保留收藏夹')
+  await confirm.getByRole('button', { name: '取消', exact: true }).click()
+  expect(await app.evaluate(() => (globalThis as any).__recommendWrites ?? [])).toEqual([])
+  await page.getByRole('button', { name: '取消所选推荐', exact: true }).click()
+  confirm = page.getByRole('dialog', { name: '取消推荐', exact: true })
+  await confirm.getByRole('button', { name: '确认取消 2 条推荐', exact: true }).click()
+  await expect(page.getByRole('status', { name: '推荐视频任务' })).toContainText('已完成', { timeout: 20000 })
+  await expect(list.getByRole('checkbox')).toHaveCount(2)
+  const writes = await app.evaluate(() => (globalThis as any).__recommendWrites)
+  expect(writes).toHaveLength(2)
+  expect(writes.map((write: any) => write.body.item_id).sort()).toEqual([
+    String(BigInt(workId) + 11n),
+    String(BigInt(workId) + 12n)
+  ])
+  expect(
+    writes.every(
+      (write: any) =>
+        write.method === 'POST' &&
+        write.body.type === '2' &&
+        write.body.source === '0' &&
+        !write.query.aweme_id
+    )
+  ).toBe(true)
+  expect((await invoke('libraryOverview', { accountId })).data).toMatchObject(counts)
+  await app.close()
+  await launch()
+  await page.getByRole('button', { name: '推荐', exact: true }).click()
+  await expect(page.getByText('本地已同步 2 个推荐视频', { exact: true })).toBeVisible()
+  expect((await invoke('libraryOverview', { accountId })).data).toMatchObject(counts)
+})
+
+test('cancels every scanned like through the native all-likes confirmation in durable 50-item batches', async ({}, info) => {
+  test.setTimeout(testTimeout(90000))
+  const { accountId } = await prepareQueue(100)
+  await page.getByRole('button', { name: '取消全部点赞', exact: true }).click()
+  let dialog = page.getByRole('dialog', { name: '取消抖音点赞', exact: true })
+  await expect(dialog).toContainText('100 条作品')
+  await expect(dialog).toContainText('每批最多50条')
+  await dialog.getByRole('button', { name: '取消', exact: true }).click()
+  expect(await app.evaluate(() => (globalThis as any).__bulkLikeWrites ?? [])).toEqual([])
+  await page.getByRole('button', { name: '取消全部点赞', exact: true }).click()
+  dialog = page.getByRole('dialog', { name: '取消抖音点赞', exact: true })
+  await dialog.getByRole('button', { name: '确认取消抖音点赞', exact: true }).click()
+  await expect
+    .poll(async () => (await invoke('snapshot')).data.unlike, { timeout: 25000 })
+    .toMatchObject({ status: 'completed', total: 100, success: 100, pending: 0, unknown: 0 })
+  const writes = await app.evaluate(() => (globalThis as any).__bulkLikeWrites)
+  expect(writes).toHaveLength(2)
+  expect(
+    writes.every(
+      (write: any) =>
+        write.method === 'POST' &&
+        write.ids.length === 50 &&
+        Object.values(write.types).every((type) => type === 0) &&
+        !write.query.aweme_ids
+    )
+  ).toBe(true)
+  expect((await invoke('query', { accountId, source: 'likes' })).data.total).toBe(0)
+  await screenshot(info.outputPath('all-likes-completed.png'))
+  await app.close()
+  await launch()
+  expect((await invoke('snapshot')).data.unlike).toMatchObject({
+    status: 'completed',
+    total: 100,
+    success: 100
+  })
+  expect((await invoke('query', { accountId, source: 'likes' })).data.total).toBe(0)
+})
+
+test('bulk cancels favorites outside all selected folders through native confirmation and preserves every protected item', async () => {
+  test.setTimeout(testTimeout(90000))
+  const { accountId, ids } = await prepareQueue(100)
+  await app.evaluate((_electron, ids) => {
+    ;(globalThis as any).__favoriteMassIds = ids
+  }, ids)
+  await page.getByRole('button', { name: '收藏', exact: true }).click()
+  await page.getByRole('button', { name: '向下采集', exact: true }).click()
+  await expect
+    .poll(async () => (await invoke('snapshot')).data.favorites, { timeout: 25000 })
+    .toMatchObject({ status: 'completed', foldersDone: 1 })
+  await page.getByRole('button', { name: '批量选择', exact: true }).click()
+  await page.getByRole('button', { name: '选择全部筛选结果', exact: true }).click()
+  await page.getByRole('button', { name: '排除收藏夹', exact: true }).click()
+  const picker = page.getByRole('dialog', { name: '排除收藏夹', exact: true })
+  await picker.getByRole('button', { name: '全选收藏夹', exact: true }).click()
+  await picker.getByRole('button', { name: '应用排除（1 个夹）', exact: true }).click()
+  await expect(page.getByLabel('批量操作')).toContainText('已选 80 条')
+  await page.getByRole('button', { name: '取消抖音收藏', exact: true }).click()
+  await page
+    .getByRole('dialog', { name: '取消抖音收藏', exact: true })
+    .getByRole('button', { name: '确认取消抖音收藏', exact: true })
+    .click()
+  await expect
+    .poll(async () => (await invoke('snapshot')).data.unlike, { timeout: 25000 })
+    .toMatchObject({ status: 'completed', success: 80, pending: 0, unknown: 0 })
+  const writes = await app.evaluate(() => (globalThis as any).__bulkFavoriteWrites)
+  expect(writes.map((write: any) => write.ids.length)).toEqual([50, 30])
+  expect(writes.flatMap((write: any) => write.ids).some((id: string) => ids.slice(0, 20).includes(id))).toBe(
+    false
+  )
+  expect((await invoke('query', { accountId, source: 'favorites' })).data.total).toBe(20)
+  expect((await invoke('query', { accountId, source: 'favorites', folderId: '8' })).data.total).toBe(20)
+  expect((await invoke('query', { accountId, source: 'likes' })).data.total).toBe(100)
+})
+
+for (const retryKind of ['xigua', 'unavailable'] as const) {
+  test(`continues unsent likes after an explicit rejection then rechecks and cancels a reselected ${retryKind} item`, async () => {
+    test.setTimeout(testTimeout(90000))
+    const { accountId } = await prepareQueue(100)
+    await app.evaluate((_electron, retryKind) => {
+      ;(globalThis as any).__rejectLikeOnce = true
+      ;(globalThis as any).__typedLikeRetry = retryKind
+    }, retryKind)
+    const startAll = async () => {
+      await page.getByRole('button', { name: '取消全部点赞', exact: true }).click()
+      await page
+        .getByRole('dialog', { name: '取消抖音点赞', exact: true })
+        .getByRole('button', { name: '确认取消抖音点赞', exact: true })
+        .click()
+    }
+    await startAll()
+    await expect
+      .poll(async () => (await invoke('snapshot')).data.unlike, { timeout: 15000 })
+      .toMatchObject({ status: 'paused', success: 49, failed: 1, pending: 50, unknown: 0 })
+    await page.getByRole('button', { name: '重试', exact: true }).click()
+    await expect
+      .poll(async () => (await invoke('snapshot')).data.unlike, { timeout: 15000 })
+      .toMatchObject({ status: 'completed', success: 99, failed: 1, pending: 0 })
+    expect((await invoke('query', { accountId, source: 'likes' })).data.total).toBe(1)
+    await page.getByRole('button', { name: '喜欢', exact: true }).click()
+    await startAll()
+    await expect
+      .poll(async () => (await invoke('snapshot')).data.unlike, { timeout: 15000 })
+      .toMatchObject({ status: 'completed', success: 1, failed: 0, pending: 0 })
+    expect((await invoke('query', { accountId, source: 'likes' })).data.total).toBe(0)
+    const writes = await app.evaluate(() => (globalThis as any).__typedLikeWrites)
+    expect(writes).toHaveLength(1)
+    expect(writes[0]).toMatchObject({ item_type: retryKind === 'xigua' ? '1' : '0', type: '0' })
+  })
+}

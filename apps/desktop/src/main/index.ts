@@ -182,7 +182,7 @@ async function bootstrap(): Promise<void> {
   })
   const win = mainWindow
   win.webContents.setZoomFactor(preferences.zoom)
-  if (remembered?.maximized) win.maximize()
+  if (remembered?.maximized && process.env.MYLIKE_HEADLESS !== '1') win.maximize()
   win.on('close', (event) => {
     if (!quitting) {
       event.preventDefault()

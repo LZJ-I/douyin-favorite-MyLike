@@ -38,6 +38,8 @@ import { metadataBytes } from './storage/usage'
 import { runtimeEventCategory, type RuntimeEventInput } from '../shared/runtime-events'
 import { saveMobileLibrary } from './mobile-export'
 import { themeSchema, type Theme } from '../shared/preferences'
+import { SavedGroupsService } from './saved-groups'
+import { parseSavedGroups } from './douyin/saved-groups'
 
 const storedTheme = themeSchema.catch('dark')
 const themeColors = {
@@ -74,6 +76,7 @@ export class Application {
   private readonly collection: CollectionService
   private readonly unlike: UnlikeService
   private readonly authentication: Authentication
+  private readonly savedGroups: SavedGroupsService
   private admission: Promise<void> = Promise.resolve()
   constructor(
     readonly database: Database,
@@ -111,7 +114,8 @@ export class Application {
         changed()
       },
       undefined,
-      this.record.bind(this)
+      this.record.bind(this),
+      async () => (await database.call('appPreferences', {})).scanMode
     )
     this.favorites = new FavoritesService(
       database,
@@ -123,7 +127,8 @@ export class Application {
         changed()
       },
       undefined,
-      this.record.bind(this)
+      this.record.bind(this),
+      async () => (await database.call('appPreferences', {})).scanMode
     )
     this.unlike = new UnlikeService(
       database,
@@ -136,6 +141,16 @@ export class Application {
       }
     )
     this.favoriteActions = new FavoriteActions(
+      database,
+      engine,
+      this.run.bind(this),
+      this.identity.bind(this),
+      () => {
+        this.libraryRevision++
+        changed()
+      }
+    )
+    this.savedGroups = new SavedGroupsService(
       database,
       engine,
       this.run.bind(this),
@@ -187,7 +202,7 @@ export class Application {
       health: activeAccountId
         ? this.healthWithFavoriteCheckpoint(activeAccountId, favorites, favoritesUpdate)
         : null,
-      busy: this.busy,
+      busy: this.busy || this.savedGroups?.running,
       collection: activeAccountId
         ? await this.database.call('collection', { accountId: activeAccountId })
         : null,
@@ -317,6 +332,19 @@ export class Application {
       )
       check()
       if (target.operation === 'likes') parseLikedPage(data)
+      else if (
+        target.operation === 'savedMixes' ||
+        target.operation === 'savedSeries' ||
+        target.operation === 'recommendations'
+      )
+        parseSavedGroups(
+          data,
+          target.operation === 'recommendations'
+            ? 'recommend'
+            : target.operation === 'savedMixes'
+              ? 'mix'
+              : 'series'
+        )
       else if (target.operation === 'folders') parseFavoriteFolders(data)
       else if (['favorites', 'folderItems'].includes(target.operation)) parseFavoritesPage(data)
       else if (target.operation === 'detail') {
@@ -685,6 +713,7 @@ export class Application {
     return task.stage === 'all' ? 'favorites' : task.stage === 'folders' ? 'folders' : 'folderItems'
   }
   private async quiesce(): Promise<void> {
+    await this.savedGroups.stop()
     await this.unlike.stop()
     await this.favoriteActions.idle(true)
     const paused = Promise.all([this.collection.pause(), this.favorites.pause()])
@@ -729,13 +758,39 @@ export class Application {
   async execute(command: Command, input: any): Promise<unknown> {
     if (this.closing) throw new AppError('CLOSING', '应用正在退出。')
     if (
+      this.savedGroups.running &&
+      ![
+        'snapshot',
+        'query',
+        'matchingIds',
+        'savedGroupsList',
+        'savedGroupsStop',
+        'runtimeEvents',
+        'diagnostics',
+        'dataInfo',
+        'theme',
+        'windowPresentation',
+        'favoriteFolders',
+        'libraryOverview',
+        'queueProgress',
+        'queueEnd',
+        'login',
+        'checkHealth',
+        'probe'
+      ].includes(command)
+    )
+      throw new AppError('BUSY', '请先停止合集或短剧任务，等待当前结果保存。')
+    if (
       [
         'login',
         'probe',
         'collectionStart',
         'favoritesStart',
+        'savedGroupsSync',
+        'savedGroupsRemove',
         'favoritesProbe',
         'unlikeStart',
+        'unlikeAll',
         'collectPage',
         'favoriteEditor',
         'favoriteSave',
@@ -780,6 +835,27 @@ export class Application {
     )
       throw new AppError('BUSY', '请先停止取消点赞或收藏任务，等待当前请求结果保存。')
     switch (command) {
+      case 'savedGroupsList':
+        await this.active(input.accountId)
+        return this.database.call('savedGroupsList', input)
+      case 'savedGroupsStop':
+        await this.active(input.accountId)
+        await this.savedGroups.stop(input.accountId)
+        return null
+      case 'savedGroupsSync':
+      case 'savedGroupsRemove':
+        await this.active(input.accountId)
+        if (this.unlike.running || this.savedGroups.running)
+          throw new AppError('BUSY', '请先停止当前取消任务。')
+        await Promise.all([this.collection.pause(), this.favorites.pause()])
+        await this.favoriteActions.idle()
+        return this.savedGroups.start(
+          input.accountId,
+          input.kind,
+          command === 'savedGroupsSync' ? 'sync' : 'remove',
+          input.ids,
+          input.excludedFolderIds
+        )
       case 'exportMobileLibrary':
         return this.exportMobileLibrary(input.accountId, input.source)
       case 'appPreferences': {
@@ -816,6 +892,58 @@ export class Application {
         return null
       case 'snapshot':
         return this.snapshot()
+      case 'scanAudit':
+        return this.run(input.accountId, async (check) => {
+          await this.active(input.accountId)
+          const account = await this.identity(input.accountId, check)
+          check()
+          if (input.source === 'detail' && !input.workId)
+            throw new AppError('INVALID_INPUT', '作品诊断必须指定作品标识。')
+          const reply = await this.engine.request(
+            input.accountId,
+            input.source,
+            input.source === 'detail'
+              ? { aweme_id: input.workId, aid: input.appId }
+              : input.source === 'favorites'
+                ? { cursor: input.cursor, count: '20' }
+                : {
+                    sec_user_id: account.remoteId!,
+                    aid: input.appId,
+                    max_cursor: input.cursor,
+                    min_cursor: '0',
+                    count: '18',
+                    whale_cut_token: '',
+                    ...(input.source === 'likes' ? { cut_version: '1' } : { from: '1' })
+                  }
+          )
+          check()
+          if (reply.sec_uid && reply.sec_uid !== account.remoteId)
+            throw new AppError('IDENTITY_MISMATCH', '诊断响应不属于当前账号，未接受数据。')
+          return {
+            source: input.source,
+            status: reply.status_code,
+            hasMore: reply.has_more,
+            cursor: reply.max_cursor ?? reply.cursor,
+            count: Array.isArray(reply.aweme_list) ? reply.aweme_list.length : null,
+            fields: Object.keys(reply).sort(),
+            state: reply.aweme_detail
+              ? {
+                  liked: reply.aweme_detail.user_digged,
+                  collected: reply.aweme_detail.collect_stat,
+                  type: reply.aweme_detail.aweme_type
+                }
+              : null,
+            samples: Array.isArray(reply.aweme_list)
+              ? reply.aweme_list
+                  .slice(0, 3)
+                  .map((i: any) => ({ id: String(i.aweme_id), title: String(i.desc ?? '').slice(0, 80) }))
+              : [],
+            continuationFields:
+              reply.whaleInfo && typeof reply.whaleInfo === 'object'
+                ? Object.keys(reply.whaleInfo).sort()
+                : []
+          }
+        })
       case 'runtimeEvents':
         await this.active(input.accountId)
         return this.database.call('runtimeEvents', { accountId: input.accountId })
@@ -1039,7 +1167,13 @@ export class Application {
           this.assertAvailable(input.accountId, ['likes'])
           if (this.unlike.running || this.favorites.running)
             throw new AppError('BUSY', '请先停止其他采集或取消点赞 / 收藏任务。')
-          return this.collection.start(input.accountId, input.mode === 'like-order' ? 'full' : input.mode)
+          return this.collection.start(
+            input.accountId,
+            ['like-order', 'restart'].includes(input.mode)
+              ? 'full'
+              : (input.mode as 'update' | 'incremental' | 'recheck'),
+            input.mode === 'restart'
+          )
         })
       case 'collectionControl':
         await this.active(input.accountId)
@@ -1053,6 +1187,9 @@ export class Application {
             return this.collection.control(input.accountId, input.taskId, input.action)
           })
         return this.collection.control(input.accountId, input.taskId, input.action)
+      case 'unlikeAll':
+        input = { ...input, source: 'likes', mode: 'batch', workIds: [], allLikes: true }
+      // fall through to the same account, task and identity guards as manual batches.
       case 'unlikeStart':
         await this.active(input.accountId)
         this.assertAvailable(
@@ -1070,7 +1207,21 @@ export class Application {
             input.accountId,
             input.source === 'favorites' ? ['detail', 'favoriteRemove'] : ['unlike']
           )
-          return this.unlike.start(input.accountId, input.workIds, input.mode, input.source)
+          if (input.excludedFolderIds?.length) {
+            if (input.source !== 'favorites') throw new AppError('INVALID_INPUT', '排除收藏夹需要收藏来源。')
+            const protectedIds = new Set(
+              await this.database.call('favoriteProtectedIds', {
+                accountId: input.accountId,
+                folderIds: input.excludedFolderIds
+              })
+            )
+            if (input.workIds.some((id: string) => protectedIds.has(id)))
+              throw new AppError(
+                'FOLDER_SELECTION_CHANGED',
+                '所选作品包含保留收藏夹的内容，请重新应用“排除收藏夹”后再确认。'
+              )
+          }
+          return this.unlike.start(input.accountId, input.workIds, input.mode, input.source, input.allLikes)
         })
       case 'unlikeControl': {
         await this.active(input.accountId)
@@ -1123,6 +1274,9 @@ export class Application {
         }
       case 'matchingIds':
         return this.database.call('matchingIds', input)
+      case 'favoriteProtectedIds':
+        await this.active(input.accountId)
+        return this.database.call('favoriteProtectedIds', input)
       case 'deleteLocal': {
         return this.exclusive(async () => {
           await this.active(input.accountId)
@@ -1340,6 +1494,7 @@ export class Application {
     this.closing = true
     this.engine.setObserver(null)
     this.authentication.stop()
+    await this.savedGroups.stop()
     await this.accountAction?.catch(() => {})
     await this.unlike.stop()
     await this.favoriteActions.idle(true)

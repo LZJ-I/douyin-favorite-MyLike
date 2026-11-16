@@ -127,7 +127,8 @@ it('persists application and playback preferences across restart without changin
     zoom: 1.1,
     motion: 'reduce',
     rememberWindow: false,
-    libraryMode: 'scroll'
+    libraryMode: 'scroll',
+    scanMode: 'fast'
   })
   expect(next.call('playbackPreferences', {})).toMatchObject({
     autoplay: false,

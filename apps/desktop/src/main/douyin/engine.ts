@@ -1,4 +1,4 @@
-import { BrowserWindow, session } from 'electron'
+import { app, BrowserWindow, session } from 'electron'
 import { randomUUID } from 'node:crypto'
 import type { EngineStatus } from '../../shared/contracts'
 import { AppError } from '../errors'
@@ -15,6 +15,7 @@ import { quietMediaScript } from './page-media'
 import { pageStateScript, type AccessEvent, type AccessTarget, type PageState } from './page-state'
 import type { RuntimeEventInput } from '../../shared/runtime-events'
 import { responseSummary } from './response-summary'
+import { parseSavedGroups } from './saved-groups'
 import { commentRead, failureResponseType, failureRule } from './response-policy'
 import { RecoveryGate } from '../recovery'
 import type { RecoveryState } from '../../shared/recovery-state'
@@ -66,6 +67,27 @@ export class DouyinEngine {
   snapshot() {
     return { status: this.status, accountId: this.accountId }
   }
+  scanSessionKey(accountId: string): string | null {
+    const win = this.window
+    if (
+      !win ||
+      win.isDestroyed() ||
+      this.accountId !== accountId ||
+      this.status !== 'ready' ||
+      !this.documentCommitted ||
+      win.isVisible() ||
+      this.interaction ||
+      this.starting
+    )
+      return null
+    return `${accountId}:${win.id}:${this.generation}`
+  }
+  scanMemoryMB(): number {
+    const win = this.window
+    if (!win || win.isDestroyed()) return 0
+    const pid = win.webContents.getOSProcessId()
+    return (app.getAppMetrics().find((process) => process.pid === pid)?.memory.workingSetSize ?? 0) / 1024
+  }
   assertAvailable(accountId: string, operation: string): void {
     this.recoveryGate.assertReady(accountId, operation)
   }
@@ -102,6 +124,7 @@ export class DouyinEngine {
     this.attention?.({ type: 'closed', accountId })
   }
   requireAttention(accountId: string, kind: 'login' | 'verification', target = this.target) {
+    if (process.env.MYLIKE_CLI === '1') return
     if (!this.suppressed) this.attention?.({ type: 'required', accountId, kind, target })
   }
   async pageState(accountId: string): Promise<PageState> {
@@ -397,6 +420,8 @@ export class DouyinEngine {
     return this.starting
   }
   async show(accountId: string): Promise<void> {
+    if (process.env.MYLIKE_CLI === '1')
+      throw new AppError('CLI_INTERACTION_REQUIRED', 'CLI模式不打开桌面窗口；登录或验证需要单独处理。')
     const ready = this.ensure(accountId)
     this.window?.show()
     this.window?.focus()
@@ -437,11 +462,34 @@ export class DouyinEngine {
     try {
       win = await Promise.race([ready, cancelled])
       const target: AccessTarget =
-        operation === 'favoriteFolderCreate'
-          ? { operation: 'folders', parameters: { cursor: '0', count: '20' } }
-          : isWriteOperation(operation)
-            ? { operation: 'detail', parameters: { aweme_id: parameters.aweme_id ?? '' } }
-            : { operation, parameters: { ...parameters } }
+        operation === 'favoriteBatch'
+          ? { operation: 'favorites', parameters: { cursor: '0', count: '20' } }
+          : operation === 'unlikeBatch'
+            ? {
+                operation: 'likes',
+                parameters: { sec_user_id: parameters.sec_user_id ?? '', max_cursor: '0', count: '20' }
+              }
+            : operation === 'recommendRemove'
+              ? {
+                  operation: 'recommendations',
+                  parameters: {
+                    sec_user_id: parameters.sec_user_id ?? '',
+                    max_cursor: '0',
+                    min_cursor: '0',
+                    count: '20',
+                    from: '1'
+                  }
+                }
+              : operation === 'mixRemove' || operation === 'seriesRemove'
+                ? {
+                    operation: operation === 'mixRemove' ? 'savedMixes' : 'savedSeries',
+                    parameters: { cursor: '0', count: '12' }
+                  }
+                : operation === 'favoriteFolderCreate'
+                  ? { operation: 'folders', parameters: { cursor: '0', count: '20' } }
+                  : isWriteOperation(operation)
+                    ? { operation: 'detail', parameters: { aweme_id: parameters.aweme_id ?? '' } }
+                    : { operation, parameters: { ...parameters } }
       if (!options.recovery) this.target = target
       if (!options.recovery && this.interaction) {
         this.requireAttention(accountId, this.interaction, target)
@@ -508,6 +556,11 @@ export class DouyinEngine {
       }
       // JSON alone is not proof that the original collection endpoint recovered.
       if (operation === 'likes') parseLikedPage(data, { allowEmpty: true })
+      if (operation === 'savedMixes' || operation === 'savedSeries' || operation === 'recommendations')
+        parseSavedGroups(
+          data,
+          operation === 'recommendations' ? 'recommend' : operation === 'savedMixes' ? 'mix' : 'series'
+        )
       const favoriteOptions = { allowEmpty: true, allowNullPage: options.allowNullFavoritePage }
       if (operation === 'favorites' || operation === 'folderItems') parseFavoritesPage(data, favoriteOptions)
       if (operation === 'folders') parseFavoriteFolders(data, favoriteOptions)

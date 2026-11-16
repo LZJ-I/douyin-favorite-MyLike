@@ -8,6 +8,9 @@ import { Store } from '../../src/main/storage/database'
 import { UnlikeService } from '../../src/main/unlike'
 import { AppError } from '../../src/main/errors'
 import { parseResponse } from '../../src/main/douyin/parse'
+import { parseUnlikeBatchResult } from '../../src/main/douyin/unlike-batch'
+import { buildPageScript } from '../../src/main/douyin/page-request'
+import { runInNewContext } from 'node:vm'
 import type { Work } from '../../src/shared/contracts'
 import type { Database } from '../../src/main/storage/client'
 const folders: string[] = [],
@@ -60,15 +63,21 @@ function reserve(store: Store) {
 }
 const finish = (store: Store, status: 'success' | 'unknown') =>
   store.call('unlikeFinish', { ...scope, workId: '1', status, reason: null, errorCode: null })
-function service(store: Store, request: (...args: any[]) => Promise<any>) {
+function service(
+  store: Store,
+  request: (...args: any[]) => Promise<any>,
+  assertAvailable?: (id: string, operation: string) => void,
+  verifyWrites = false
+) {
   const db = { call: async (method: any, input: any) => store.call(method, input) } as Database
   const value = new UnlikeService(
     db,
-    { request },
+    { request, assertAvailable },
     async (_id, action) => action(() => {}),
     async () => store.call('accounts', undefined)[0]!,
     () => {},
-    0
+    0,
+    verifyWrites
   )
   services.push(value)
   return value
@@ -77,6 +86,24 @@ async function settled(value: UnlikeService) {
   for (let i = 0; i < 300 && value.running; i++) await new Promise((r) => setTimeout(r, 2))
   expect(value.running).toBe(false)
 }
+it.each([0, 1] as const)('checks platform state after acknowledgement: user_digged=%s', async (digged) => {
+  const { store } = setup()
+  const value = service(
+    store,
+    async (_account, operation, params) => {
+      if (operation === 'detail')
+        return { status_code: 0, aweme_detail: { aweme_id: params.aweme_id, user_digged: digged } }
+      return { status_code: 0 }
+    },
+    undefined,
+    true
+  )
+  const task = await value.start('a', ['1'], 'single')
+  await settled(value)
+  const result = store.call('unlikeTask', { accountId: 'a', taskId: task.id })
+  expect(result).toMatchObject(digged ? { success: 0, unknown: 1 } : { success: 1, unknown: 0 })
+  expect(store.call('query', query).total).toBe(digged ? 2 : 1)
+})
 afterEach(async () => {
   for (const value of services.splice(0)) await value.stop()
   for (const store of stores.splice(0))
@@ -114,6 +141,394 @@ it('commits success with local removal atomically and retains another account pl
   expect(store.call('query', { ...query, accountId: 'b' }).total).toBe(2)
   expect(store.call('queueState', { accountId: 'a' })?.work.id).toBe('1')
   expect(() => finish(store, 'unknown')).toThrow(/不能覆盖/)
+})
+
+function bulkFixture(store: Store) {
+  const ids = Array.from({ length: 100 }, (_, i) => String(i + 100))
+  store.call('savePage', {
+    accountId: 'a',
+    remoteId: 'remote-a',
+    items: ids.map(work),
+    cursor: '0',
+    hasMore: false
+  })
+  return ids
+}
+it.each([0, 1] as const)(
+  'does not trust a batch ack without checking all target states: %s',
+  async (digged) => {
+    const { store } = setup()
+    const ids = bulkFixture(store).slice(0, 50)
+    let checked = 0
+    const value = service(
+      store,
+      async (_account, operation, params) => {
+        if (operation === 'detail') {
+          checked++
+          return { status_code: 0, aweme_detail: { aweme_id: params.aweme_id, user_digged: digged } }
+        }
+        return { status_code: 0, fatal_ids: [] }
+      },
+      undefined,
+      true
+    )
+    const task = await value.start('a', ids, 'batch')
+    await settled(value)
+    expect(store.call('unlikeTask', { accountId: 'a', taskId: task.id })).toMatchObject(
+      digged ? { success: 0, unknown: 50 } : { success: 50, unknown: 0 }
+    )
+    expect(checked).toBe(digged ? 1 : 50)
+  }
+)
+function previousRejection(store: Store) {
+  create(store)
+  reserve(store)
+  store.call('unlikeFinish', {
+    ...scope,
+    workId: '1',
+    status: 'failed',
+    errorCode: 'API_REJECTED',
+    reason: 'fixture rejected'
+  })
+  store.call('unlikeUpdate', { ...scope, status: 'paused', reason: 'fixture rejected' })
+}
+it('allows one explicit cancellation of an owned platform-seen reaction when its post is unavailable, without fetching protected content', async () => {
+  const { store } = setup()
+  previousRejection(store)
+  const operations: string[] = []
+  const value = service(store, async (_account, operation, parameters) => {
+    operations.push(operation)
+    if (operation === 'detail') throw new AppError('CONTENT_UNAVAILABLE', 'fixture private post')
+    expect(operation).toBe('unlike')
+    expect(parameters).toEqual({ aweme_id: '1' })
+    return { status_code: 0 }
+  })
+  await value.start('a', ['1'], 'single')
+  await settled(value)
+  expect(operations).toEqual(['detail', 'unlike'])
+  expect(store.call('query', query).total).toBe(1)
+})
+it('never treats authentication or verification failures as permission to send an unavailable-post cancellation', async () => {
+  const { store } = setup()
+  previousRejection(store)
+  const operations: string[] = []
+  const value = service(store, async (_account, operation) => {
+    operations.push(operation)
+    throw new AppError('VERIFICATION_REQUIRED', 'fixture challenge')
+  })
+  await value.start('a', ['1'], 'single')
+  await settled(value)
+  expect(operations).toEqual(['detail'])
+  expect(store.call('query', query).total).toBe(2)
+  expect(store.call('unlikeTask', { accountId: 'a' })).toMatchObject({ pending: 1, unknown: 0, inflight: 0 })
+})
+it('rechecks an explicitly reselected failed like and uses the web client Xigua item type when needed', async () => {
+  const { store } = setup()
+  previousRejection(store)
+  const operations: string[] = []
+  const value = service(store, async (_account, operation, parameters) => {
+    operations.push(operation)
+    if (operation === 'detail')
+      return { status_code: 0, aweme_detail: { aweme_id: '1', user_digged: 1, aweme_type: 107 } }
+    expect(operation).toBe('unlike')
+    expect(parameters).toEqual({ aweme_id: '1', item_type: '1' })
+    return { status_code: 0 }
+  })
+  await value.start('a', ['1'], 'single')
+  await settled(value)
+  expect(operations).toEqual(['detail', 'unlike'])
+  expect(store.call('query', query).total).toBe(1)
+})
+it('resolves an explicitly reselected failed like that is already unliked without repeating a write', async () => {
+  const { store } = setup()
+  previousRejection(store)
+  const operations: string[] = []
+  const value = service(store, async (_account, operation) => {
+    operations.push(operation)
+    return { status_code: 0, aweme_detail: { aweme_id: '1', user_digged: 0, aweme_type: 107 } }
+  })
+  await value.start('a', ['1'], 'single')
+  await settled(value)
+  expect(operations).toEqual(['detail'])
+  expect(store.call('query', query).total).toBe(1)
+  expect(store.call('unlikeTask', { accountId: 'a' })).toMatchObject({ success: 1, failed: 0, unknown: 0 })
+})
+it('serializes a type-aware single cancellation rather than silently forcing normal-video type', async () => {
+  let body = ''
+  const context = {
+    URLSearchParams,
+    AbortController,
+    Map,
+    setTimeout,
+    clearTimeout,
+    fetch: async (_url: string, options: RequestInit) => {
+      body = String(options.body)
+      return { status: 200, headers: new Headers(), text: async () => '{"status_code":0}' }
+    }
+  }
+  await runInNewContext(
+    buildPageScript({
+      id: 'typed',
+      operation: 'unlike',
+      parameters: { aweme_id: '1', item_type: '1' },
+      timeout: 1000
+    }),
+    context
+  )
+  expect(Object.fromEntries(new URLSearchParams(body))).toEqual({ aweme_id: '1', item_type: '1', type: '0' })
+})
+it('refuses a locally blocked batch before reservation and keeps all pending items known-unsent', async () => {
+  const { store } = setup(),
+    ids = bulkFixture(store)
+  let requests = 0
+  const value = service(
+    store,
+    async () => {
+      requests++
+      return { status_code: 0 }
+    },
+    () => {
+      throw new AppError('RECOVERY_WAIT', 'fixture cooldown')
+    }
+  )
+  const task = await value.start('a', ids, 'batch')
+  await settled(value)
+  expect(requests).toBe(0)
+  expect(store.call('unlikeTask', { accountId: 'a', taskId: task.id })).toMatchObject({
+    status: 'paused',
+    pending: 100,
+    unknown: 0,
+    inflight: 0
+  })
+})
+it('creates a durable all-likes task beyond the manual selection cap, scoped to the bound account', () => {
+  const { store } = setup()
+  const ids = Array.from({ length: 1100 }, (_, i) => String(i + 100))
+  store.call('savePage', {
+    accountId: 'a',
+    remoteId: 'remote-a',
+    items: ids.map(work),
+    cursor: '0',
+    hasMore: false
+  })
+  expect(() =>
+    store.call('unlikeCreate', { accountId: 'a', id: 'manual', mode: 'batch', workIds: ids })
+  ).toThrow('1000')
+  const task = store.call('unlikeCreate', {
+    accountId: 'a',
+    id: 'all',
+    mode: 'batch',
+    workIds: [],
+    allLikes: true
+  })
+  expect(task).toMatchObject({ total: 1102, pending: 1102, source: 'likes', remoteId: 'remote-a' })
+  expect(store.call('query', { ...query, accountId: 'b' }).total).toBe(2)
+  expect(store.call('unlikeBatchNext', { accountId: 'a', taskId: task.id })).toHaveLength(50)
+  expect(() =>
+    store.call('unlikeCreate', {
+      accountId: 'b',
+      id: 'bad',
+      mode: 'batch',
+      source: 'favorites',
+      workIds: [],
+      allLikes: true
+    })
+  ).toThrow('全量任务仅用于')
+})
+it('uses the verified 50-item cancellation POST contract and rejects ambiguous per-item results', async () => {
+  let seen: { url: URL; options: RequestInit } | null = null
+  const context = {
+    URLSearchParams,
+    AbortController,
+    Map,
+    setTimeout,
+    clearTimeout,
+    fetch: async (url: string, options: RequestInit) => {
+      seen = { url: new URL(url), options }
+      return { status: 200, headers: new Headers(), text: async () => '{"status_code":0,"fatal_ids":[]}' }
+    }
+  }
+  await runInNewContext(
+    buildPageScript({
+      id: 'batch',
+      operation: 'unlikeBatch',
+      parameters: { aweme_ids: '100,101', item_type_map: '{"100":0,"101":0}', sec_user_id: 'remote-a' },
+      timeout: 1000
+    }),
+    context
+  )
+  expect(seen!.url.pathname).toBe('/aweme/v1/web/cancel/item/digg/multi/')
+  expect(seen!.options.method).toBe('POST')
+  expect(Object.fromEntries(new URLSearchParams(String(seen!.options.body)))).toEqual({
+    aweme_ids: '100,101',
+    item_type_map: '{"100":0,"101":0}'
+  })
+  expect(seen!.url.searchParams.has('aweme_ids')).toBe(false)
+  await runInNewContext(
+    buildPageScript({
+      id: 'favorite-batch',
+      operation: 'favoriteBatch',
+      parameters: { aweme_ids: '100,101', aweme_type_map: '{"100":0,"101":0}' },
+      timeout: 1000
+    }),
+    context
+  )
+  expect(seen!.url.pathname).toBe('/aweme/v1/web/aweme/cancel/collect/multi/')
+  expect(seen!.options.method).toBe('POST')
+  expect(Object.fromEntries(new URLSearchParams(String(seen!.options.body)))).toEqual({
+    aweme_ids: '100,101',
+    aweme_type_map: '{"100":0,"101":0}'
+  })
+  expect([...parseUnlikeBatchResult({ status_code: 0, fatal_ids: ['101'] }, ['100', '101'])]).toEqual(['101'])
+  for (const result of [
+    {},
+    { status_code: 0, fatal_ids: 'bad' },
+    { status_code: 0, fatal_ids: ['other'] },
+    { status_code: 0, second_verify_type: 'challenge' }
+  ])
+    expect(() => parseUnlikeBatchResult(result, ['100', '101'])).toThrow()
+})
+it('cancels 100 scanned likes in two requests, preserves favorites and other accounts, and saves every outcome', async () => {
+  const { store } = setup(),
+    ids = bulkFixture(store),
+    batches: string[][] = []
+  store.call('favoriteConfirm', {
+    accountId: 'a',
+    remoteId: 'remote-a',
+    work: work(ids[0]!),
+    folder: { id: '8', title: '保留', remoteCount: 1, localCount: 0 }
+  })
+  const value = service(store, async (_account, operation, parameters) => {
+    expect(operation).toBe('unlikeBatch')
+    const batch = parameters.aweme_ids.split(',')
+    expect(batch).toHaveLength(50)
+    batches.push(batch)
+    expect(Object.values(JSON.parse(parameters.item_type_map))).toEqual(Array(50).fill(0))
+    return { status_code: 0, fatal_ids: [] }
+  })
+  const task = await value.start('a', ids, 'batch')
+  await settled(value)
+  expect(batches.flat()).toEqual(ids)
+  expect(store.call('unlikeTask', { accountId: 'a', taskId: task.id })).toMatchObject({
+    status: 'completed',
+    success: 100,
+    pending: 0,
+    unknown: 0
+  })
+  expect(store.call('query', query).total).toBe(2)
+  expect(store.call('query', { ...query, accountId: 'b' }).total).toBe(2)
+  expect(store.call('favoriteStatus', { accountId: 'a', workId: ids[0]! }).collected).toBe(true)
+})
+it('cancels only selected folder-external favorites in 50-item batches while retaining protected memberships and all likes', async () => {
+  const { store } = setup(),
+    ids = bulkFixture(store)
+  let task = store.call('favoritesStart', { accountId: 'a', id: 'full' })
+  const save = (data: any) => {
+    task = store.call('favoritesSave', {
+      accountId: 'a',
+      remoteId: 'remote-a',
+      taskId: task.id,
+      stage: task.stage,
+      folderId: task.folderId,
+      requestCursor: task.cursor,
+      cursor: '0',
+      hasMore: false,
+      ...data
+    })
+  }
+  save({ items: ids.map(work) })
+  save({ folders: [{ id: '8', title: '保留', remoteCount: 20 }] })
+  save({ items: ids.slice(0, 20).map(work) })
+  const before = store.call('favoriteFolders', { accountId: 'a' })
+  const protectedIds = new Set(store.call('favoriteProtectedIds', { accountId: 'a', folderIds: ['8'] }))
+  const selected = ids.filter((id) => !protectedIds.has(id)),
+    batches: string[][] = []
+  const value = service(store, async (_account, operation, parameters) => {
+    expect(operation).toBe('favoriteBatch')
+    const sent = parameters.aweme_ids.split(',')
+    expect(sent.length).toBeLessThanOrEqual(50)
+    expect(sent.some((id: string) => protectedIds.has(id))).toBe(false)
+    expect(parameters.aweme_type_map).toBeTruthy()
+    batches.push(sent)
+    return { status_code: 0, fatal_ids: [] }
+  })
+  const removal = await value.start('a', selected, 'batch', 'favorites')
+  await settled(value)
+  expect(batches.map((batch) => batch.length)).toEqual([50, 30])
+  expect(store.call('unlikeTask', { accountId: 'a', taskId: removal.id })).toMatchObject({
+    status: 'completed',
+    success: 80,
+    unknown: 0
+  })
+  expect(store.call('query', { ...query, source: 'favorites' }).total).toBe(20)
+  expect(store.call('query', query).total).toBe(102)
+  expect(store.call('favoriteFolders', { accountId: 'a' })).toEqual(before)
+})
+it('pauses after a partially rejected batch and retains only the rejected and unsent likes', async () => {
+  const { store } = setup(),
+    ids = bulkFixture(store)
+  let requests = 0
+  const value = service(store, async () => {
+    requests++
+    return { status_code: 0, fatal_ids: [ids[0]] }
+  })
+  const task = await value.start('a', ids, 'batch')
+  await settled(value)
+  expect(requests).toBe(1)
+  expect(store.call('unlikeTask', { accountId: 'a', taskId: task.id })).toMatchObject({
+    status: 'paused',
+    success: 49,
+    failed: 1,
+    pending: 50,
+    unknown: 0
+  })
+  expect(store.call('query', query).total).toBe(53)
+})
+it('marks all 50 in-flight items unknown after a lost batch response and never resends them automatically', async () => {
+  const { store } = setup(),
+    ids = bulkFixture(store)
+  let requests = 0
+  const value = service(store, async () => {
+    requests++
+    throw new AppError('TIMEOUT', 'fixture timeout')
+  })
+  const task = await value.start('a', ids, 'batch')
+  await settled(value)
+  expect(requests).toBe(1)
+  expect(store.call('unlikeTask', { accountId: 'a', taskId: task.id })).toMatchObject({
+    status: 'paused',
+    success: 0,
+    unknown: 50,
+    pending: 50
+  })
+  expect(store.call('query', query).total).toBe(102)
+  await expect(value.start('a', ids.slice(0, 50), 'batch')).rejects.toThrow('结果未知')
+})
+it('waits for the current 50-item batch when stopped, preserving confirmations without sending later batches', async () => {
+  const { store } = setup(),
+    ids = bulkFixture(store)
+  let release!: () => void,
+    requests = 0
+  const value = service(store, async () => {
+    requests++
+    await new Promise<void>((resolve) => {
+      release = resolve
+    })
+    return { status_code: 0, fatal_ids: [] }
+  })
+  const task = await value.start('a', ids, 'batch')
+  for (let i = 0; i < 100 && !release; i++) await new Promise((resolve) => setTimeout(resolve, 2))
+  expect(requests).toBe(1)
+  const stop = value.stop()
+  release()
+  await stop
+  expect(requests).toBe(1)
+  expect(store.call('unlikeTask', { accountId: 'a', taskId: task.id })).toMatchObject({
+    status: 'stopped',
+    success: 50,
+    pending: 50,
+    unknown: 0
+  })
 })
 it('recovers an interrupted write as unknown, blocks new writes across history, and scopes readonly resolution', () => {
   const { store, file } = setup()

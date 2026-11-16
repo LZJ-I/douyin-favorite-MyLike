@@ -9,6 +9,7 @@ import {
 } from './mobile-library'
 import { FavoriteState, favoriteStateSchema } from './favorite-state'
 import { RuntimeEventsStore } from './runtime-events'
+import { MAX_EMPTY_PAGE_CURSORS } from '../read-recovery'
 import { purgeAccountRows, purgeAccountBackups } from './account-purge'
 import { DatabaseSync } from 'node:sqlite'
 import { mkdirSync, renameSync, unlinkSync } from 'node:fs'
@@ -21,6 +22,7 @@ import { AppError } from '../errors'
 import { PlaybackStore } from './playback'
 import { UnlikeStore } from './unlike'
 import { appPreferencesSchema } from '../../shared/preferences'
+import { SavedGroupsStore, savedGroupsSchema } from './saved-groups'
 
 const publicationYear = "CAST(strftime('%Y',w.publishedAt,'unixepoch','localtime') AS INTEGER)"
 const supportedPublicationYear = `${publicationYear} BETWEEN ${MIN_LIBRARY_YEAR} AND ${MAX_LIBRARY_YEAR}`
@@ -31,6 +33,7 @@ export class Store {
   private readonly favorites: FavoritesStore
   private readonly playback: PlaybackStore
   private readonly unlike: UnlikeStore
+  private readonly savedGroups: SavedGroupsStore
   constructor(private readonly file: string) {
     this.db = new DatabaseSync(file)
     this.events = new RuntimeEventsStore(this.db)
@@ -106,6 +109,8 @@ export class Store {
           "BEGIN IMMEDIATE; ALTER TABLE unlike_tasks ADD COLUMN source TEXT NOT NULL DEFAULT 'likes' CHECK(source IN ('likes','favorites')); PRAGMA user_version=7; COMMIT;"
         )
       this.db.exec('BEGIN IMMEDIATE; ' + favoriteStateSchema + likedOrderSchema + ' COMMIT;')
+      this.db.exec('BEGIN IMMEDIATE; ' + savedGroupsSchema + ' COMMIT;')
+      this.savedGroups = new SavedGroupsStore(this.db, this.transaction.bind(this))
       const favoriteState = new FavoriteState(this.db)
       const favoriteTasks = this.db.prepare('SELECT id FROM saved_tasks').all()
       for (const task of favoriteTasks) favoriteState.ensure(String(task.id))
@@ -332,6 +337,21 @@ export class Store {
   }
   private dispatch(method: keyof Inputs, input: any): unknown {
     switch (method) {
+      case 'savedGroupsList':
+        this.account(input.accountId)
+        return this.savedGroups.library(input.accountId, input.kind)
+      case 'savedGroupsBegin':
+        return this.savedGroups.begin(input)
+      case 'savedGroupsScope':
+        return this.savedGroups.scope(input.accountId, input.taskId)
+      case 'savedGroupsPage':
+        return this.savedGroups.page(input)
+      case 'savedGroupsNext':
+        return this.savedGroups.next(input.accountId, input.taskId)
+      case 'savedGroupsWrite':
+        return this.savedGroups.write(input)
+      case 'savedGroupsFinish':
+        return this.savedGroups.finish(input.accountId, input.taskId, input.status, input.reason)
       case 'runtimeEvents':
         return this.events.read(input.accountId)
       case 'appendRuntimeEvent':
@@ -380,6 +400,9 @@ export class Store {
         return this.favorites.task(input.accountId, input.mode)
       case 'favoriteFolders':
         return this.favorites.folders(input.accountId)
+      case 'favoriteProtectedIds':
+        this.account(input.accountId)
+        return this.favorites.protectedIds(input.accountId, input.folderIds)
       case 'favoriteStatus':
         this.account(input.accountId)
         return this.favorites.status(input.accountId, input.workId)
@@ -558,7 +581,7 @@ export class Store {
             throw new AppError('CANCELLED', '任务已暂停或断点已变化，本页未保存。')
           if (
             !cursors.length ||
-            cursors.length > 6 ||
+            cursors.length > MAX_EMPTY_PAGE_CURSORS ||
             cursors[0] !== anchor ||
             cursors.at(-1) !== input.requestCursor ||
             new Set(cursors).size !== cursors.length ||
@@ -710,7 +733,24 @@ export class Store {
       case 'matchingIds': {
         this.account(input.accountId)
         const { from, params, order } = this.filter(input)
-        const rows = this.db.prepare(`SELECT w.id ${from} ${order} LIMIT ?`).all(...params, MAX_BATCH_SIZE)
+        let exclusion = ''
+        if (input.includedFolderIds) {
+          if (input.source !== 'favorites') throw new AppError('INVALID_INPUT', '按收藏夹选择需要收藏来源。')
+          this.favorites.protectedIds(input.accountId, input.includedFolderIds)
+          exclusion +=
+            ' AND EXISTS(SELECT 1 FROM saved_members m WHERE m.accountId=a.accountId AND m.workId=w.id AND m.folderId IN (SELECT value FROM json_each(?)))'
+          params.push(JSON.stringify(input.includedFolderIds))
+        }
+        if (input.excludedFolderIds?.length) {
+          if (input.source !== 'favorites') throw new AppError('INVALID_INPUT', '排除收藏夹需要收藏来源。')
+          this.favorites.protectedIds(input.accountId, input.excludedFolderIds)
+          exclusion +=
+            ' AND NOT EXISTS(SELECT 1 FROM saved_members m WHERE m.accountId=a.accountId AND m.workId=w.id AND m.folderId IN (SELECT value FROM json_each(?)))'
+          params.push(JSON.stringify(input.excludedFolderIds))
+        }
+        const rows = this.db
+          .prepare(`SELECT w.id ${from} ${exclusion} ${order} LIMIT ?`)
+          .all(...params, MAX_BATCH_SIZE)
         return rows.map((row) => String(row.id))
       }
       case 'deleteLocal': {
@@ -751,8 +791,12 @@ export class Store {
       case 'unlikeHistory':
       case 'unlikeItems':
       case 'unlikeCreate':
+        if (input.allLikes) this.backup('before-cancel-all-likes')
+        return this.unlike.call(method, input)
       case 'unlikeUpdate':
       case 'unlikeNext':
+      case 'unlikeBatchNext':
+      case 'unlikeNeedsTypeCheck':
       case 'unlikeReserve':
       case 'unlikeFinish':
       case 'unlikeSkip':

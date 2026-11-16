@@ -20,10 +20,12 @@ import { usePlaybackPreferences } from './usePlaybackPreferences'
 import { Dashboard } from './Dashboard'
 import { useOverview } from './useOverview'
 import { HelpPage } from './HelpPage'
+import { SavedGroupsView } from './SavedGroupsView'
 
 export function App() {
   const [snapshot, setSnapshot] = useState<Snapshot | null>(null)
   const [tab, setTab] = useState<Tab>('library')
+  const [favoriteKind, setFavoriteKind] = useState<'works' | 'mix' | 'series'>('works')
   const [revision, setRevision] = useState(0)
   const [operation, setOperation] = useState('')
   const [notice, setNotice] = useState('')
@@ -37,6 +39,9 @@ export function App() {
     ids: string[]
     source: 'likes' | 'favorites'
     mode: 'single' | 'batch'
+    excludedFolderIds?: string[]
+    allLikes?: boolean
+    total?: number
   } | null>(null)
   const snapshotSequence = useRef(0)
   const dataKey = useRef('')
@@ -60,12 +65,15 @@ export function App() {
   )
   const favoritesLibrary = useLibrary(
     accountId,
-    (!playback.view || presentation.leaving) && tab === 'favorites',
+    (!playback.view || presentation.leaving) && tab === 'favorites' && favoriteKind === 'works',
     revision,
     libraryMode,
     'favorites'
   )
-  const favoriteFolders = useFavoriteFolders(tab === 'favorites' ? accountId : null, revision)
+  const favoriteFolders = useFavoriteFolders(
+    tab === 'favorites' || tab === 'recommendations' ? accountId : null,
+    revision
+  )
   const library = tab === 'favorites' ? favoritesLibrary : likesLibrary
   const { folderId, setFolderId } = favoritesLibrary
   useEffect(() => {
@@ -199,13 +207,14 @@ export function App() {
               dashboard: '仪表盘',
               library: '喜欢的内容',
               favorites: '收藏的内容',
+              recommendations: '我推荐的视频',
               tasks: '任务',
               settings: '应用设置',
               faq: '常见问题'
             }[tab]
           }
         </h1>
-        {(tab === 'library' || tab === 'favorites') && (
+        {(tab === 'library' || (tab === 'favorites' && favoriteKind === 'works')) && (
           <LibrarySearch value={library.search} change={library.setSearch} />
         )}
         {tab === 'library' && (
@@ -236,8 +245,18 @@ export function App() {
       )}
     </>
   )
-  const favoriteControls =
+  const favoriteTypes =
     tab === 'favorites' ? (
+      <div className="favorite-type-tabs" aria-label="收藏类型">
+        {(['works', 'mix', 'series'] as const).map((kind, index) => (
+          <button key={kind} aria-pressed={favoriteKind === kind} onClick={() => setFavoriteKind(kind)}>
+            {['收藏作品', '收藏合集', '收藏短剧'][index]}
+          </button>
+        ))}
+      </div>
+    ) : null
+  const favoriteControls =
+    tab === 'favorites' && favoriteKind === 'works' ? (
       <FavoritesPanel
         snapshot={snapshot}
         compact
@@ -285,7 +304,7 @@ export function App() {
         <div className="window-bar">
           <span className="window-drag-space" />
         </div>
-        {tab !== 'library' && tab !== 'favorites' && heading}
+        {tab !== 'library' && tab !== 'favorites' && tab !== 'recommendations' && heading}
         {tab === 'dashboard' && (
           <Dashboard
             account={account}
@@ -298,12 +317,39 @@ export function App() {
           />
         )}
         {tab === 'faq' && <HelpPage />}
-        {(tab === 'library' || tab === 'favorites') && (
+        {tab === 'recommendations' && (
+          <SavedGroupsView
+            key={accountId + ':recommend'}
+            accountId={accountId}
+            kind="recommend"
+            header={heading}
+            busy={!!operation || !!snapshot?.busy || !!unliking}
+            perform={perform}
+            favoriteFolders={favoriteFolders}
+          />
+        )}
+        {tab === 'favorites' && favoriteKind !== 'works' && (
+          <SavedGroupsView
+            key={accountId + favoriteKind}
+            accountId={accountId}
+            kind={favoriteKind}
+            header={
+              <>
+                {heading}
+                {favoriteTypes}
+              </>
+            }
+            busy={!!operation || !!snapshot?.busy || !!unliking}
+            perform={perform}
+          />
+        )}
+        {(tab === 'library' || (tab === 'favorites' && favoriteKind === 'works')) && (
           <LibraryView
             key={tab}
             header={
               <>
                 {heading}
+                {favoriteTypes}
                 {favoriteControls}
               </>
             }
@@ -333,6 +379,20 @@ export function App() {
                 : undefined
             }
             library={library}
+            cancelAllLikes={
+              tab === 'library' && accountId
+                ? () =>
+                    setUnlikeTarget({
+                      accountId,
+                      ids: [],
+                      source: 'likes',
+                      mode: 'batch',
+                      allLikes: true,
+                      total: likesLibrary.page.total
+                    })
+                : undefined
+            }
+            favoriteFolders={tab === 'favorites' ? favoriteFolders : undefined}
             account={account}
             busy={!!operation}
             mutationBusy={!!operation || unliking}
@@ -370,6 +430,7 @@ export function App() {
                   accountId,
                   ids: [...library.selection.ids],
                   mode: 'batch',
+                  excludedFolderIds: tab === 'favorites' ? library.selection.excludedFolderIds : undefined,
                   source: tab === 'favorites' ? 'favorites' : 'likes'
                 })
             }}
@@ -460,12 +521,15 @@ export function App() {
               unlikeTarget.source === 'favorites' ? '启动取消收藏任务' : '启动取消点赞任务',
               async () => {
                 await call(
-                  window.mylike.invoke('unlikeStart', {
-                    accountId: unlikeTarget.accountId,
-                    workIds: unlikeTarget.ids,
-                    source: unlikeTarget.source,
-                    mode: unlikeTarget.mode
-                  })
+                  unlikeTarget.allLikes
+                    ? window.mylike.invoke('unlikeAll', { accountId: unlikeTarget.accountId })
+                    : window.mylike.invoke('unlikeStart', {
+                        accountId: unlikeTarget.accountId,
+                        workIds: unlikeTarget.ids,
+                        source: unlikeTarget.source,
+                        mode: unlikeTarget.mode,
+                        excludedFolderIds: unlikeTarget.excludedFolderIds
+                      })
                 )
                 library.selection.clear()
                 setUnlikeTarget(null)
@@ -475,14 +539,24 @@ export function App() {
           }
         >
           <p>
-            将以“{account?.name}”（抖音昵称：{account?.nickname || '尚未核验'}）取消 {unlikeTarget.ids.length}{' '}
-            条作品的抖音{unlikeTarget.source === 'favorites' ? '收藏' : '点赞'}。
+            将以“{account?.name}”（抖音昵称：{account?.nickname || '尚未核验'}）取消{' '}
+            {unlikeTarget.allLikes ? unlikeTarget.total : unlikeTarget.ids.length} 条作品的抖音
+            {unlikeTarget.source === 'favorites' ? '收藏' : '点赞'}。
           </p>
           {unlikeTarget.source === 'favorites' && <p>取消后会从默认收藏及所有收藏夹中移除，喜欢列表保留。</p>}
-          <p>
-            这会修改抖音账号。每条成功后移除对应本地条目；未知结果保留条目。采集将先暂停，一次最多 1000
-            条，任务详情可停止后续未发送项。
-          </p>
+          {!!unlikeTarget.excludedFolderIds?.length && (
+            <p>已排除 {unlikeTarget.excludedFolderIds.length} 个保留收藏夹的内容，它们不会被取消收藏。</p>
+          )}
+          {unlikeTarget.allLikes ? (
+            <p>
+              将处理当前账号本地已同步的全部点赞，自动分批发送，每批最多50条；每条结果单独保存。收藏及收藏夹保持不变，可到任务页停止后续未发送项。
+            </p>
+          ) : (
+            <p>
+              这会修改抖音账号。每条成功后移除对应本地条目；未知结果保留条目。采集将先暂停，一次最多 1000
+              条，任务详情可停止后续未发送项。
+            </p>
+          )}
           {error && (
             <p className="task-error" role="alert">
               {error}

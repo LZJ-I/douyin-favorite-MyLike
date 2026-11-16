@@ -52,6 +52,8 @@ export function useLibrary(
   const [pendingChanges, setPendingChanges] = useState(false)
   const [selecting, setSelecting] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [excludedFolderIds, setExcludedFolderIds] = useState<string[]>([])
+  const [protectedIds, setProtectedIds] = useState<Set<string>>(new Set())
   const scroll = useRef<HTMLDivElement>(null)
   const controls = useRef<HTMLDivElement>(null)
   const toolbar = useRef<HTMLDivElement>(null)
@@ -94,6 +96,8 @@ export function useLibrary(
     selectionSequence.current++
     setSelected(new Set())
     setSelecting(false)
+    setExcludedFolderIds([])
+    setProtectedIds(new Set())
   }
   useLayoutEffect(() => {
     restored.current = storageKey
@@ -295,13 +299,47 @@ export function useLibrary(
   const selectAll = async () => {
     if (!accountId) return
     const seq = ++selectionSequence.current
-    const ids = await call(window.mylike.invoke('matchingIds', filter))
+    const protectedWorks = excludedFolderIds.length
+      ? await call(window.mylike.invoke('favoriteProtectedIds', { accountId, folderIds: excludedFolderIds }))
+      : []
+    const ids = await call(window.mylike.invoke('matchingIds', { ...filter, excludedFolderIds }))
     if (seq === selectionSequence.current && scope.current === key) {
       setSelected(new Set(ids))
+      setProtectedIds(new Set(protectedWorks))
       setSelecting(true)
     }
   }
+  const protectFolders = async (folderIds: string[]) => {
+    if (!accountId || source !== 'favorites') return
+    const seq = ++selectionSequence.current
+    const ids = await call(window.mylike.invoke('favoriteProtectedIds', { accountId, folderIds }))
+    if (seq !== selectionSequence.current || scope.current !== key) return
+    const protectedWorks = new Set(ids)
+    setProtectedIds(protectedWorks)
+    setExcludedFolderIds(folderIds)
+    setSelected((old) => new Set([...old].filter((id) => !protectedWorks.has(id))))
+  }
+  const selectFolders = async (folderIds: string[], mode: 'include' | 'exclude') => {
+    if (mode === 'exclude') return protectFolders(folderIds)
+    if (!accountId || source !== 'favorites') return
+    const seq = ++selectionSequence.current
+    const ids = await call(window.mylike.invoke('matchingIds', { ...filter, includedFolderIds: folderIds }))
+    if (seq !== selectionSequence.current || scope.current !== key) return
+    setSelected(new Set(ids))
+    setProtectedIds(new Set())
+    setExcludedFolderIds([])
+    setSelecting(true)
+  }
+  const invertSelection = async () => {
+    if (!accountId) return
+    const seq = ++selectionSequence.current
+    const ids = await call(window.mylike.invoke('matchingIds', { ...filter, excludedFolderIds }))
+    if (seq !== selectionSequence.current || scope.current !== key) return
+    setSelected((old) => new Set(ids.filter((id) => !old.has(id))))
+    setSelecting(true)
+  }
   const toggle = (id: string) => {
+    if (protectedIds.has(id)) return
     selectionSequence.current++
     setSelected((old) => {
       const next = new Set(old)
@@ -370,13 +408,18 @@ export function useLibrary(
     pendingChanges,
     selection: {
       enabled: selecting,
+      excludedFolderIds,
+      protectFolders,
+      selectFolders,
+      invert: invertSelection,
+      isProtected: (id: string) => protectedIds.has(id),
       enable: () => setSelecting(true),
       ids: selected,
       all: selectAll,
       toggle,
       add: (ids: string[]) => {
         selectionSequence.current++
-        setSelected((old) => new Set([...old, ...ids]))
+        setSelected((old) => new Set([...old, ...ids.filter((id) => !protectedIds.has(id))]))
       },
       clear: clearSelection
     }

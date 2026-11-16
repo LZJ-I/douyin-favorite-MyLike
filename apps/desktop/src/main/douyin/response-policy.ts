@@ -17,7 +17,12 @@ export function bareEnvelope(data: Payload, operation?: Operation): boolean {
   return contentRead(operation) && keys.length > 0 && keys.every((key) => envelopeKeys.has(key))
 }
 export const collectionRead = (operation?: Operation) =>
-  operation === 'favorites' || operation === 'folders' || operation === 'folderItems'
+  operation === 'favorites' ||
+  operation === 'folders' ||
+  operation === 'folderItems' ||
+  operation === 'savedMixes' ||
+  operation === 'savedSeries' ||
+  operation === 'recommendations'
 const record = (value: unknown): Payload | null =>
   value !== null && typeof value === 'object' && !Array.isArray(value) ? (value as Payload) : null
 const nonempty = (value: unknown) =>

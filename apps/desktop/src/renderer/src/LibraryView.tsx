@@ -1,4 +1,4 @@
-import type { Dispatch, ReactNode, SetStateAction } from 'react'
+import { useState, type Dispatch, type ReactNode, type SetStateAction } from 'react'
 import {
   ArrowRight,
   ChevronLeft,
@@ -19,6 +19,9 @@ import { MAX_BATCH_SIZE, type Account, type Work, type QueueState } from '../../
 import type { Library } from './useLibrary'
 import { Select } from './Select'
 import { useDragSelection } from './useDragSelection'
+import { FolderExclusionDialog } from './FolderExclusionDialog'
+import { FolderSelectionDialog } from './FolderSelectionDialog'
+import type { useFavoriteFolders } from './FavoritesPanel'
 
 type Props = {
   header: ReactNode
@@ -26,7 +29,9 @@ type Props = {
   rebuildBusy: boolean
   readOnly?: boolean
   exportMobileLibrary?: () => void
+  cancelAllLikes?: () => void
   library: Library
+  favoriteFolders?: ReturnType<typeof useFavoriteFolders>
   account: Account | undefined
   busy: boolean
   mutationBusy: boolean
@@ -44,11 +49,13 @@ type Props = {
 }
 export function LibraryView({
   library,
+  favoriteFolders,
   header,
   rebuildLikedOrder,
   rebuildBusy,
   readOnly = false,
   exportMobileLibrary,
+  cancelAllLikes,
   account,
   busy,
   mutationBusy,
@@ -64,6 +71,9 @@ export function LibraryView({
   continuePlayback,
   dismissPlayback
 }: Props) {
+  const [foldersOpen, setFoldersOpen] = useState(false)
+  const [folderSelectionOpen, setFolderSelectionOpen] = useState(false)
+  const [selectionError, setSelectionError] = useState('')
   const {
     search,
     type,
@@ -193,6 +203,20 @@ export function LibraryView({
                   : `${page.total} 条内容`}
             </span>
             <div className="list-actions">
+              {cancelAllLikes && (
+                <button
+                  className="danger-button"
+                  disabled={!page.total || mutationBusy || querying}
+                  onClick={cancelAllLikes}
+                >
+                  取消全部点赞
+                </button>
+              )}
+              {favoriteFolders && (
+                <button disabled={busy} onClick={() => setFoldersOpen(true)}>
+                  查看收藏夹
+                </button>
+              )}
               {exportMobileLibrary && (
                 <button disabled={busy} onClick={exportMobileLibrary}>
                   <ArrowDownToLine size={15} />
@@ -217,6 +241,29 @@ export function LibraryView({
               <button disabled={!selection.ids.size || busy} onClick={selection.clear}>
                 清空选择
               </button>
+              <button
+                disabled={busy || querying}
+                onClick={() => {
+                  setSelectionError('')
+                  void selection.invert().catch((error) => setSelectionError(error.message))
+                }}
+              >
+                {page.total > MAX_BATCH_SIZE ? `反选前 ${MAX_BATCH_SIZE} 条` : '反选筛选结果'}
+              </button>
+              {favoriteFolders && (
+                <button disabled={busy || querying} onClick={() => setFolderSelectionOpen(true)}>
+                  按收藏夹选择
+                </button>
+              )}
+              {selectionError && <span role="alert">{selectionError}</span>}
+              {favoriteFolders && (
+                <button disabled={busy || querying} onClick={() => setFoldersOpen(true)}>
+                  排除收藏夹
+                </button>
+              )}
+              {!!selection.excludedFolderIds.length && (
+                <span role="status">已保留 {selection.excludedFolderIds.length} 个收藏夹</span>
+              )}
               {!readOnly && (
                 <button disabled={!selection.ids.size || mutationBusy} onClick={remove}>
                   <Trash2 size={14} />
@@ -413,7 +460,8 @@ export function LibraryView({
                               type="checkbox"
                               aria-label={`选择 ${work.title || work.id}`}
                               checked={selection.ids.has(work.id)}
-                              disabled={busy || querying}
+                              disabled={busy || querying || selection.isProtected(work.id)}
+                              title={selection.isProtected(work.id) ? '此作品属于保留收藏夹' : undefined}
                               onChange={() => selection.toggle(work.id)}
                             />
                           )}
@@ -440,6 +488,23 @@ export function LibraryView({
           )}
         </div>
       </div>
+      {foldersOpen && favoriteFolders && (
+        <FolderExclusionDialog
+          {...favoriteFolders}
+          selected={selection.excludedFolderIds}
+          selecting={selection.enabled}
+          apply={selection.protectFolders}
+          close={() => setFoldersOpen(false)}
+        />
+      )}
+      {folderSelectionOpen && favoriteFolders && (
+        <FolderSelectionDialog
+          {...favoriteFolders}
+          selected={selection.excludedFolderIds}
+          apply={selection.selectFolders}
+          close={() => setFolderSelectionOpen(false)}
+        />
+      )}
       {library.paginated && page.total > 0 && (
         <form
           className="library-pagination"

@@ -5,8 +5,10 @@ import type { Database } from './storage/client'
 import type { DouyinEngine } from './douyin/engine'
 import { parseFavoriteFolders, parseFavoritesPage } from './douyin/parse'
 import { AppError, publicError } from './errors'
-import { PageProgress, EndConfirmation, EmptyPageTraversal } from './read-recovery'
+import { PageProgress, EndConfirmation, EmptyPageTraversal, readPageDelay } from './read-recovery'
 import { collectionPolicy as policy } from './collection-policy'
+import { scanPolicy, scanNeedsRecycle, type ScanMode } from './collection-policy'
+import { ScanIdentity } from './scan-identity'
 import { readRecovery } from './recovery'
 import type { RuntimeEventInput } from '../shared/runtime-events'
 
@@ -63,12 +65,13 @@ export class FavoritesService {
   constructor(
     private readonly db: Pick<Database, 'call'>,
     private readonly engine: Pick<DouyinEngine, 'request' | 'cancel' | 'release' | 'snapshot'> &
-      Partial<Pick<DouyinEngine, 'assertAvailable'>>,
+      Partial<Pick<DouyinEngine, 'assertAvailable' | 'scanSessionKey' | 'scanMemoryMB'>>,
     private readonly run: Runner,
     private readonly identity: (accountId: string, check: () => void) => Promise<Account>,
     private readonly changed: (committed?: boolean) => void,
     private readonly timing = policy,
-    private readonly report: (accountId: string, event: RuntimeEventInput) => void = () => {}
+    private readonly report: (accountId: string, event: RuntimeEventInput) => void = () => {},
+    private readonly getScanMode: () => Promise<ScanMode> = async () => 'normal'
   ) {}
   get running() {
     return !!this.loop
@@ -261,20 +264,15 @@ export class FavoritesService {
     const unavailable = () => new AppError('FAVORITE_EMPTY_PAGE', '抖音暂未返回这一页内容，已保留进度。')
     try {
       let position = cursor
+      const traversal = new EmptyPageTraversal(cursor)
       let result = await read(cursor)
-      if (result.page.hasMore && empty(result.page)) {
-        const next = result.page.cursor
-        if (next === cursor) throw unavailable()
-        await this.wait(this.timing.retry, signal)
-        result = await read(cursor)
-        if (result.page.hasMore && empty(result.page)) {
-          if (result.page.cursor !== next) throw unavailable()
-          position = next
-          await this.wait(this.timing.interval, signal)
-          result = await read(position)
-          if (!ids(result.page).length) throw unavailable()
-        }
+      while (result.page.hasMore && empty(result.page)) {
+        traversal.check(result.page.cursor)
+        position = traversal.cursor
+        await this.wait(this.timing.interval, signal)
+        result = await read(position)
       }
+      if (position !== cursor && !ids(result.page).length) throw unavailable()
       if (!result.page.hasMore) {
         const ending = new EndConfirmation()
         ending.check(position, ids(result.page), false)
@@ -300,7 +298,7 @@ export class FavoritesService {
             folderId: task.folderId,
             requestCursor: position,
             checkpointCursor: cursor,
-            traversedCursors: skipped ? [cursor, position] : [cursor],
+            traversedCursors: traversal.requests,
             incomplete: skipped && task.stage !== 'all',
             resumePausedAt: task.updatedAt
           })
@@ -395,6 +393,12 @@ export class FavoritesService {
     })
   }
   private async collect(initial: FavoritesTask, signal: AbortSignal) {
+    let timing: typeof policy | null = null
+    let mode: ScanMode = 'normal'
+    let slowUntil = 0
+    const identity = new ScanIdentity(this.identity, (accountId) =>
+      mode === 'fast' ? (this.engine.scanSessionKey?.(accountId) ?? null) : null
+    )
     const progress = new PageProgress()
     const ending = new EndConfirmation()
     let traversal = new EmptyPageTraversal(initial.cursor)
@@ -408,11 +412,22 @@ export class FavoritesService {
     }
     while (!signal.aborted && task.status === 'running') {
       try {
+        if (!timing) {
+          mode = await this.getScanMode()
+          timing = scanPolicy(this.timing, mode)
+        }
         this.engine.assertAvailable?.(
           task.accountId,
           task.stage === 'all' ? 'favorites' : task.stage === 'folders' ? 'folders' : 'folderItems'
         )
-        if (pages >= this.timing.pagesPerSegment || Date.now() - started >= this.timing.segmentMs) {
+        if (
+          scanNeedsRecycle(
+            timing,
+            pages,
+            Date.now() - started,
+            pages % 32 === 0 ? this.engine.scanMemoryMB?.() : 0
+          )
+        ) {
           this.activity = 'recycling'
           this.changed()
           await this.run(
@@ -424,7 +439,8 @@ export class FavoritesService {
             },
             true
           )
-          await this.wait(this.timing.cooldown, signal)
+          identity.invalidate()
+          await this.wait(timing.cooldown, signal)
           valid()
           pages = 0
           started = Date.now()
@@ -442,18 +458,20 @@ export class FavoritesService {
             this.activity = 'requesting'
             this.changed()
             try {
-              const account = await this.identity(task.accountId, guard)
+              const account = await identity.get(task.accountId, guard)
               guard()
               const result = await this.engine.request(
                 task.accountId,
                 task.stage === 'all' ? 'favorites' : task.stage === 'folders' ? 'folders' : 'folderItems',
-                this.parameters(traversal.cursor, task.folderId)
+                this.parameters(traversal.cursor, task.folderId),
+                { allowNullFavoritePage: task.stage !== 'folders' }
               )
               guard()
+              identity.assertCurrent(task.accountId)
               const page =
                 task.stage === 'folders'
                   ? parseFavoriteFolders(result, { allowEmpty: true })
-                  : parseFavoritesPage(result, { allowEmpty: true })
+                  : parseFavoritesPage(result, { allowEmpty: true, allowNullPage: true })
               const received = 'folders' in page ? page.folders.length : page.received
               if (page.hasMore && !received) {
                 traversal.check(page.cursor)
@@ -514,10 +532,17 @@ export class FavoritesService {
         pages++
         this.changed()
         if (task.status === 'running')
-          await this.wait(saved ? this.timing.interval : this.timing.retry, signal)
+          await this.wait(
+            saved
+              ? Math.max(timing.interval, Date.now() < slowUntil ? 800 : 0)
+              : readPageDelay(this.activity, timing.interval, this.timing.retry),
+            signal
+          )
       } catch (error) {
         if (signal.aborted) return
         const detail = publicError(error)
+        identity.invalidate()
+        slowUntil = Date.now() + 60_000
         ending.reset()
         const recovery = readRecovery({
           source: 'favorites',

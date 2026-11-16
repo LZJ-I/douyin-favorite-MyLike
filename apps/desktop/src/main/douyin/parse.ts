@@ -359,7 +359,7 @@ function collectionList(data: Obj, field: string, label: string, allowNullPage =
   if (data[field] == null && String(data.status_code) === '0' && [0, false, '0'].includes(data.has_more))
     return []
   if (data[field] == null && String(data.status_code) === '0' && [1, true, '1'].includes(data.has_more)) {
-    if (allowNullPage) return []
+    if (allowNullPage && data[field] === null && Object.hasOwn(data, field)) return []
     if (data[field] === null)
       throw new AppError('FAVORITE_EMPTY_PAGE', '抖音暂未返回这一页内容，请点击核验状态。')
   }

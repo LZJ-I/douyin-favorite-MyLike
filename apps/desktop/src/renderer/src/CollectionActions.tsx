@@ -53,6 +53,20 @@ export function CollectionActions({
         role="group"
         aria-label={source === 'likes' ? '喜欢采集操作' : '收藏采集操作'}
       >
+        {source === 'likes' && (
+          <button
+            disabled={!accountId || busy || running}
+            onClick={() =>
+              void perform('从头全量读取', async () => {
+                if (!accountId) return
+                const result = await window.mylike.invoke('collectionStart', { accountId, mode: 'restart' })
+                if (!result.ok) throw new Error(result.error.message)
+              })
+            }
+          >
+            从头全量读取
+          </button>
+        )}
         <button
           disabled={!accountId || busy || running || waiting(source === 'likes' ? 'likes' : 'favorites')}
           onClick={() => execute('top')}

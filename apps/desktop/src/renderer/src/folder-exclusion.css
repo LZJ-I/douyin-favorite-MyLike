@@ -1,0 +1,46 @@
+.modal.folder-exclusion-dialog {
+  width: min(560px, calc(100vw - 48px));
+  max-height: calc(100dvh - 64px);
+  overflow: auto;
+}
+.folder-exclusion-hint {
+  color: var(--muted);
+  font-size: 12px;
+}
+.folder-exclusion-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 14px 0;
+}
+.folder-exclusion-list {
+  max-height: 40dvh;
+  overflow: auto;
+  margin: 16px 0;
+}
+.folder-exclusion-dialog .folder-exclusion-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 4px;
+  border-bottom: 1px solid var(--line);
+  margin: 0;
+  color: var(--text);
+  font-size: 14px;
+}
+.folder-exclusion-row span {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.folder-exclusion-row small {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.folder-exclusion-dialog .folder-exclusion-row input {
+  flex-shrink: 0;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--accent);
+}

@@ -22,8 +22,42 @@ import type {
 import type { FavoritesPage } from './favorites'
 import type { AppPreferences, WindowState } from '../../shared/preferences'
 import type { RuntimeEvent, RuntimeEventInput } from '../../shared/runtime-events'
+import type { SavedGroup, SavedGroupKind, SavedGroupLibrary, SavedGroupTask } from '../../shared/saved-groups'
 
 export interface Inputs {
+  savedGroupsList: { accountId: string; kind: SavedGroupKind }
+  savedGroupsBegin: {
+    accountId: string
+    kind: SavedGroupKind
+    taskId: string
+    remoteId: string
+    mode: 'sync' | 'remove'
+    ids?: string[]
+  }
+  savedGroupsScope: { accountId: string; taskId: string }
+  savedGroupsPage: {
+    accountId: string
+    taskId: string
+    remoteId: string
+    requestCursor: string
+    cursor: string
+    hasMore: boolean
+    items: SavedGroup[]
+  }
+  savedGroupsNext: { accountId: string; taskId: string }
+  savedGroupsWrite: {
+    accountId: string
+    taskId: string
+    id: string
+    status: 'sending' | 'success' | 'failed' | 'unknown'
+    reason?: string
+  }
+  savedGroupsFinish: {
+    accountId: string
+    taskId: string
+    status: SavedGroupTask['status']
+    reason: string | null
+  }
   runtimeEvents: { accountId: string }
   appendRuntimeEvent: { accountId: string; event: RuntimeEventInput }
   appPreferences: { preferences?: Partial<AppPreferences> }
@@ -49,6 +83,7 @@ export interface Inputs {
   }
   favoritesSave: FavoritesPage
   favoriteFolders: { accountId: string }
+  favoriteProtectedIds: { accountId: string; folderIds: string[] }
   favoriteStatus: { accountId: string; workId: string }
   favoriteWriteGuard: { accountId: string; workId: string }
   favoriteRememberFolder: { accountId: string; remoteId: string; folder: FavoriteFolder }
@@ -94,7 +129,7 @@ export interface Inputs {
   query: Query
   mobileLibraryExport: { accountId: string; source?: MobileLibrarySource }
   libraryOverview: { accountId: string }
-  matchingIds: Filter
+  matchingIds: Filter & { excludedFolderIds?: string[]; includedFolderIds?: string[] }
   deleteLocal: { accountId: string; workIds: string[] }
   unlikeTask: { accountId: string; taskId?: string }
   unlikeHistory: { accountId: string }
@@ -106,6 +141,7 @@ export interface Inputs {
     workIds: string[]
     mode: 'single' | 'batch'
     source?: 'likes' | 'favorites'
+    allLikes?: boolean
   }
   unlikeUpdate: {
     accountId: string
@@ -115,6 +151,8 @@ export interface Inputs {
     errorCode?: string | null
   }
   unlikeNext: { accountId: string; taskId: string }
+  unlikeBatchNext: { accountId: string; taskId: string }
+  unlikeNeedsTypeCheck: { accountId: string; taskId: string; workId: string }
   unlikeReserve: { accountId: string; taskId: string; workId: string }
   unlikeFinish: {
     accountId: string
@@ -139,6 +177,13 @@ export interface Inputs {
   close: undefined
 }
 export interface Replies {
+  savedGroupsList: SavedGroupLibrary
+  savedGroupsBegin: SavedGroupLibrary
+  savedGroupsScope: { kind: SavedGroupKind; remoteId: string; mode: 'sync' | 'remove'; status: string }
+  savedGroupsPage: SavedGroupLibrary
+  savedGroupsNext: string | null
+  savedGroupsWrite: null
+  savedGroupsFinish: SavedGroupLibrary
   runtimeEvents: RuntimeEvent[]
   appendRuntimeEvent: null
   appPreferences: AppPreferences
@@ -150,6 +195,7 @@ export interface Replies {
   favoritesUpdate: FavoritesTask
   favoritesSave: FavoritesTask
   favoriteFolders: FavoriteFolder[]
+  favoriteProtectedIds: string[]
   favoriteStatus: { collected: boolean }
   favoriteWriteGuard: null
   favoriteRememberFolder: FavoriteFolder
@@ -179,6 +225,8 @@ export interface Replies {
   unlikeCreate: UnlikeTask
   unlikeUpdate: UnlikeTask
   unlikeNext: (UnlikeItem & { platformSeen: boolean }) | null
+  unlikeBatchNext: UnlikeItem[]
+  unlikeNeedsTypeCheck: boolean
   unlikeReserve: null
   unlikeSkip: UnlikeTask
   unlikeFinish: UnlikeTask

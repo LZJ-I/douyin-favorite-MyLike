@@ -206,6 +206,17 @@ export function SettingsPanel({
                 }
               />
             </Row>
+            <Row label="扫描速度" description="快速模式减少重复核验和连接重建；下次开始或继续采集生效">
+              <Select
+                label="扫描速度"
+                value={application.scanMode}
+                options={[
+                  { value: 'fast', label: '快速' },
+                  { value: 'normal', label: '标准' }
+                ]}
+                onChange={(value) => updateApplication({ scanMode: value === 'normal' ? 'normal' : 'fast' })}
+              />
+            </Row>
             <Row label="界面缩放" description="同时调整文字和控件大小">
               <Select
                 label="界面缩放"

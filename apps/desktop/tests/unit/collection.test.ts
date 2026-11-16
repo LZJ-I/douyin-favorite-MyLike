@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { Store } from '../../src/main/storage/database'
 import { CollectionService } from '../../src/main/collection'
 import { RequestLane } from '../../src/main/request-lane'
+import { MAX_EMPTY_PAGE_CURSORS } from '../../src/main/read-recovery'
 import { AppError } from '../../src/main/errors'
 import type { CollectionTask, Work } from '../../src/shared/contracts'
 import type { Database } from '../../src/main/storage/client'
@@ -521,8 +522,11 @@ describe('request scheduling and task control', () => {
       max_cursor: String(Number(cursor) + 1)
     }))
     await service.start('a', 'update')
-    await expect.poll(() => service.running).toBe(false)
-    const path = ['1', '2', '3', '4', '5', '6'].flatMap((cursor) => [cursor, cursor])
+    await expect.poll(() => service.running, { timeout: 10000 }).toBe(false)
+    const path = Array.from({ length: MAX_EMPTY_PAGE_CURSORS }, (_, i) => String(i + 1)).flatMap((cursor) => [
+      cursor,
+      cursor
+    ])
     expect(cursors).toEqual(['0', ...path])
     expect(store.call('collection', { accountId: 'a' })).toMatchObject({
       status: 'paused',
@@ -533,9 +537,9 @@ describe('request scheduling and task control', () => {
     expect(store.call('checkpoint', { accountId: 'a' })).toEqual({ cursor: '1', hasMore: true })
     expect(releases()).toBeGreaterThan(0)
     await service.control('a', store.call('collection', { accountId: 'a' })!.id, 'resume')
-    await expect.poll(() => service.running).toBe(false)
-    expect(cursors.slice(13)).toEqual(path)
-  })
+    await expect.poll(() => service.running, { timeout: 10000 }).toBe(false)
+    expect(cursors.slice(1 + path.length)).toEqual(path)
+  }, 30000)
   it('crosses two stable empty pages, holds the anchor while probing, and saves the actual end cursor', async () => {
     const { service, store, cursors } = serviceFixture(async (cursor) => {
       if (cursor !== '0') expect(store.call('checkpoint', { accountId: 'a' })?.cursor).toBe('10')

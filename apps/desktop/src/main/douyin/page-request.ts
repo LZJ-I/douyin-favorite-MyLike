@@ -1,5 +1,14 @@
 export type WriteOperation =
-  'unlike' | 'favoriteRemove' | 'favoriteAdd' | 'favoriteFolderAdd' | 'favoriteFolderCreate'
+  | 'unlike'
+  | 'favoriteRemove'
+  | 'favoriteAdd'
+  | 'favoriteFolderAdd'
+  | 'favoriteFolderCreate'
+  | 'mixRemove'
+  | 'seriesRemove'
+  | 'recommendRemove'
+  | 'unlikeBatch'
+  | 'favoriteBatch'
 export type Operation =
   | 'self'
   | 'likes'
@@ -7,13 +16,25 @@ export type Operation =
   | 'favorites'
   | 'folders'
   | 'folderItems'
+  | 'savedMixes'
+  | 'savedSeries'
+  | 'recommendations'
   | 'comments'
   | 'commentReplies'
   | WriteOperation
 export function isWriteOperation(operation: Operation): operation is WriteOperation {
-  return ['unlike', 'favoriteRemove', 'favoriteAdd', 'favoriteFolderAdd', 'favoriteFolderCreate'].includes(
-    operation
-  )
+  return [
+    'unlike',
+    'favoriteRemove',
+    'favoriteAdd',
+    'favoriteFolderAdd',
+    'favoriteFolderCreate',
+    'mixRemove',
+    'seriesRemove',
+    'recommendRemove',
+    'unlikeBatch',
+    'favoriteBatch'
+  ].includes(operation)
 }
 export interface PageRequest {
   id: string
@@ -32,9 +53,17 @@ async function requestInPage(request: PageRequest) {
     comments: '/aweme/v1/web/comment/list/',
     commentReplies: '/aweme/v1/web/comment/list/reply/',
     unlike: '/aweme/v1/web/commit/item/digg/',
+    unlikeBatch: '/aweme/v1/web/cancel/item/digg/multi/',
+    favoriteBatch: '/aweme/v1/web/aweme/cancel/collect/multi/',
     favorites: '/aweme/v1/web/aweme/listcollection/',
     folders: '/aweme/v1/web/collects/list/',
     folderItems: '/aweme/v1/web/collects/video/list/',
+    savedMixes: '/aweme/v1/web/mix/listcollection/',
+    savedSeries: '/aweme/v1/web/series/collections/',
+    recommendations: '/aweme/v1/web/familiar/recommend/feed/',
+    recommendRemove: '/aweme/v1/web/familiar/recommend/cancel',
+    mixRemove: '/aweme/v1/web/mix/cancel/collect/multi/',
+    seriesRemove: '/aweme/v1/web/series/cancel/collect/multi/',
     favoriteAdd: '/aweme/v1/web/aweme/collect/',
     favoriteRemove: '/aweme/v1/web/aweme/collect/',
     favoriteFolderAdd: '/aweme/v1/web/collects/video/move/',
@@ -54,17 +83,34 @@ async function requestInPage(request: PageRequest) {
     update_version_code: '170400',
     cookie_enabled: 'true',
     platform: 'PC',
-    ...(['unlike', 'favorites', 'favoriteAdd', 'favoriteRemove'].includes(request.operation)
+    ...([
+      'unlike',
+      'favorites',
+      'favoriteAdd',
+      'favoriteRemove',
+      'mixRemove',
+      'seriesRemove',
+      'recommendRemove',
+      'unlikeBatch',
+      'favoriteBatch'
+    ].includes(request.operation)
       ? {}
       : request.parameters)
   })
-  const collection = ['favorites', 'folders', 'folderItems'].includes(request.operation)
+  const collection = ['favorites', 'folders', 'folderItems', 'savedMixes', 'savedSeries'].includes(
+    request.operation
+  )
   const commentRead = request.operation === 'comments' || request.operation === 'commentReplies'
-  const referrer = collection
-    ? 'https://www.douyin.com/user/self?from_tab_name=main&showTab=favorite_collection'
-    : commentRead
-      ? 'https://www.douyin.com/video/' + (request.parameters.aweme_id ?? request.parameters.item_id)
-      : undefined
+  const recommendation = request.operation === 'recommendations' || request.operation === 'recommendRemove'
+  if (recommendation) params.set('device_platform', '')
+  if (request.operation === 'recommendRemove') params.set('app_name', 'douyin_web')
+  const referrer = recommendation
+    ? 'https://www.douyin.com/user/self?showTab=recommend'
+    : collection
+      ? 'https://www.douyin.com/user/self?from_tab_name=main&showTab=favorite_collection'
+      : commentRead
+        ? 'https://www.douyin.com/video/' + (request.parameters.aweme_id ?? request.parameters.item_id)
+        : undefined
   if (collection || commentRead) {
     if (request.operation !== 'favorites' && !params.has('count')) params.set('count', '20')
     params.set('pc_client_type', '1')
@@ -107,7 +153,7 @@ async function requestInPage(request: PageRequest) {
   try {
     // Match the original page-SDK request: use only the current page's token,
     // never a fabricated or persisted signing value.
-    if (request.operation === 'likes' || collection || commentRead) {
+    if (request.operation === 'likes' || collection || commentRead || recommendation) {
       try {
         const token = document.cookie.match(/(?:^|;\s*)msToken=([^;]+)/)?.[1]
         if (token) {
@@ -132,36 +178,70 @@ async function requestInPage(request: PageRequest) {
         'favoriteAdd',
         'favoriteRemove',
         'favoriteFolderAdd',
-        'favoriteFolderCreate'
+        'favoriteFolderCreate',
+        'mixRemove',
+        'seriesRemove',
+        'recommendRemove',
+        'unlikeBatch',
+        'favoriteBatch'
       ].includes(request.operation)
         ? 'POST'
         : 'GET',
       headers: {
         accept: 'application/json, text/plain, */*',
         ...(request.operation === 'favorites' ? { 'x-secsdk-csrf-token': 'DOWNGRADE' } : {}),
-        ...(['unlike', 'favorites', 'favoriteAdd', 'favoriteRemove'].includes(request.operation)
+        ...([
+          'unlike',
+          'favorites',
+          'favoriteAdd',
+          'favoriteRemove',
+          'mixRemove',
+          'seriesRemove',
+          'recommendRemove',
+          'unlikeBatch',
+          'favoriteBatch'
+        ].includes(request.operation)
           ? { 'content-type': 'application/x-www-form-urlencoded;charset=UTF-8' }
           : {})
       },
       body:
-        request.operation === 'unlike'
+        request.operation === 'unlikeBatch' || request.operation === 'favoriteBatch'
           ? new URLSearchParams({
-              aweme_id: request.parameters.aweme_id ?? '',
-              item_type: '0',
-              type: '0'
+              aweme_ids: request.parameters.aweme_ids ?? '',
+              [request.operation === 'unlikeBatch' ? 'item_type_map' : 'aweme_type_map']:
+                request.parameters[
+                  request.operation === 'unlikeBatch' ? 'item_type_map' : 'aweme_type_map'
+                ] ?? '{}'
             }).toString()
-          : request.operation === 'favoriteAdd' || request.operation === 'favoriteRemove'
+          : request.operation === 'recommendRemove'
             ? new URLSearchParams({
-                aweme_id: request.parameters.aweme_id ?? '',
-                action: request.operation === 'favoriteRemove' ? '0' : '1',
-                aweme_type: request.parameters.aweme_type ?? '0'
+                type: '2',
+                item_id: request.parameters.item_id ?? '',
+                source: '0'
               }).toString()
-            : request.operation === 'favorites'
+            : request.operation === 'unlike'
               ? new URLSearchParams({
-                  cursor: request.parameters.cursor ?? '0',
-                  count: request.parameters.count ?? '20'
+                  aweme_id: request.parameters.aweme_id ?? '',
+                  item_type: request.parameters.item_type ?? '0',
+                  type: '0'
                 }).toString()
-              : undefined
+              : request.operation === 'favoriteAdd' || request.operation === 'favoriteRemove'
+                ? new URLSearchParams({
+                    aweme_id: request.parameters.aweme_id ?? '',
+                    action: request.operation === 'favoriteRemove' ? '0' : '1',
+                    aweme_type: request.parameters.aweme_type ?? '0'
+                  }).toString()
+                : request.operation === 'mixRemove' || request.operation === 'seriesRemove'
+                  ? new URLSearchParams({
+                      [request.operation === 'mixRemove' ? 'mix_ids' : 'series_ids']:
+                        request.parameters[request.operation === 'mixRemove' ? 'mix_ids' : 'series_ids'] ?? ''
+                    }).toString()
+                  : request.operation === 'favorites'
+                    ? new URLSearchParams({
+                        cursor: request.parameters.cursor ?? '0',
+                        count: request.parameters.count ?? '20'
+                      }).toString()
+                    : undefined
     })
     const length = Number(response.headers.get('content-length') ?? 0)
     if (length > 16 * 1024 * 1024) return { id: request.id, error: 'TOO_LARGE' }

@@ -80,6 +80,88 @@ function round(store: Store, id = 'run') {
   task = save(store, task, { items: [work('1')] })
   return save(store, task, { items: [work('2')] })
 }
+
+it('protects the union of selected folders, including overlapping membership and large identifiers', () => {
+  const { store } = setup()
+  round(store)
+  store.call('favoriteConfirm', {
+    accountId: 'a',
+    remoteId: 'remote-a',
+    work: work('1'),
+    folder: { id: '8', title: '音乐', remoteCount: 2, localCount: 1 }
+  })
+  expect(store.call('favoriteProtectedIds', { accountId: 'a', folderIds: ['8'] }).sort()).toEqual(['1', '2'])
+  expect(
+    store.call('favoriteProtectedIds', { accountId: 'a', folderIds: ['8', '9007199254740993999'] }).sort()
+  ).toEqual(['1', '2'])
+  expect(
+    store.call('matchingIds', { ...query, source: 'favorites', excludedFolderIds: ['9007199254740993999'] })
+  ).toEqual(['2'])
+  expect(store.call('matchingIds', { ...query, source: 'favorites', excludedFolderIds: ['8'] })).toEqual([])
+  expect(store.call('query', { ...query, source: 'favorites' }).total).toBe(2)
+  expect(() => store.call('favoriteProtectedIds', { accountId: 'b', folderIds: ['8'] })).toThrow(
+    '同步全部收藏夹'
+  )
+})
+
+it('refuses exclusions for incomplete syncs and missing folders, while allowing empty exclusions', () => {
+  const { store } = setup()
+  expect(store.call('favoriteProtectedIds', { accountId: 'a', folderIds: [] })).toEqual([])
+  expect(() => store.call('favoriteProtectedIds', { accountId: 'a', folderIds: ['8'] })).toThrow(
+    '同步全部收藏夹'
+  )
+  round(store)
+  expect(() => store.call('favoriteProtectedIds', { accountId: 'a', folderIds: ['404'] })).toThrow(
+    '收藏夹列表已变化'
+  )
+  store.call('favoritesStart', { accountId: 'a', id: 'incomplete-run' })
+  expect(() =>
+    store.call('matchingIds', { ...query, source: 'favorites', excludedFolderIds: ['8'] })
+  ).toThrow('同步全部收藏夹')
+})
+
+it('excludes before applying the batch limit, across all pages and with the current search filter', () => {
+  const { store, file } = setup()
+  round(store)
+  const db = new DatabaseSync(file)
+  try {
+    db.exec('PRAGMA foreign_keys=ON; BEGIN IMMEDIATE')
+    const insertWork = db.prepare("INSERT INTO works VALUES(?,?,'作者',1700000000,NULL,'video',0)")
+    const insertSaved = db.prepare("INSERT INTO saved_items VALUES('a',?,1)")
+    const insertMember = db.prepare("INSERT INTO saved_members VALUES('a','8',?,'run')")
+    for (let i = 100; i < 1200; i++) {
+      insertWork.run(String(i), '批量 ' + i)
+      insertSaved.run(String(i))
+      insertMember.run(String(i))
+    }
+    db.exec('COMMIT')
+  } finally {
+    db.close()
+  }
+  const filter = { ...query, source: 'favorites' as const, excludedFolderIds: ['8'] }
+  expect(store.call('favoriteProtectedIds', { accountId: 'a', folderIds: ['8'] })).toHaveLength(1101)
+  expect(store.call('matchingIds', filter)).toEqual(['1'])
+  expect(store.call('matchingIds', { ...filter, search: '批量' })).toEqual([])
+  expect(store.call('matchingIds', { ...filter, excludedFolderIds: [] })).toHaveLength(1000)
+  expect(
+    store.call('matchingIds', { ...query, source: 'favorites', includedFolderIds: ['9007199254740993999'] })
+  ).toEqual(['1'])
+  expect(store.call('matchingIds', { ...query, source: 'favorites', includedFolderIds: [] })).toEqual([])
+  expect(
+    store.call('matchingIds', { ...query, source: 'favorites', includedFolderIds: ['8'], search: '批量' })
+  ).toHaveLength(1000)
+  expect(
+    store.call('matchingIds', {
+      ...query,
+      source: 'favorites',
+      includedFolderIds: ['8'],
+      excludedFolderIds: ['8']
+    })
+  ).toEqual([])
+  expect(() =>
+    store.call('matchingIds', { ...query, source: 'favorites', accountId: 'b', includedFolderIds: ['8'] })
+  ).toThrow('同步全部收藏夹')
+})
 afterEach(() => {
   for (const store of stores.splice(0)) {
     try {

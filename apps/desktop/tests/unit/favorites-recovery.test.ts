@@ -96,6 +96,22 @@ async function settled(instance: FavoritesService) {
   for (let i = 0; i < 500 && instance.running; i++) await new Promise((r) => setTimeout(r, 2))
   expect(instance.running).toBe(false)
 }
+it('crosses more than six stable null pages and commits only when content becomes readable', async () => {
+  const { store } = setup()
+  const cursors: string[] = []
+  const instance = service(store, async (_id, operation, params, options) => {
+    if (operation === 'folders') return { status_code: 0, has_more: 0, collects_list: [] }
+    cursors.push(params.cursor)
+    expect(options.allowNullFavoritePage).toBe(true)
+    return Number(params.cursor) < 9
+      ? { status_code: 0, has_more: 1, cursor: String(Number(params.cursor) + 1), aweme_list: null }
+      : { status_code: 0, has_more: 0, cursor: '0', aweme_list: [{ aweme_id: '91' }] }
+  })
+  await instance.start('a')
+  await settled(instance)
+  expect(cursors).toEqual([...Array.from({ length: 9 }, (_, i) => [String(i), String(i)]).flat(), '9', '9'])
+  expect(store.call('query', query).items.map((w) => w.id)).toEqual(['91'])
+})
 afterEach(async () => {
   for (const instance of services.splice(0)) await instance.pause()
   for (const store of stores.splice(0))

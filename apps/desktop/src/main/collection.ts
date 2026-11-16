@@ -4,8 +4,10 @@ import type { Database } from './storage/client'
 import type { DouyinEngine } from './douyin/engine'
 import { parseLikedPage } from './douyin/parse'
 import { AppError, publicError } from './errors'
-import { PageProgress, EndConfirmation, EmptyPageTraversal } from './read-recovery'
+import { PageProgress, EndConfirmation, EmptyPageTraversal, readPageDelay } from './read-recovery'
 import { collectionPolicy as policy } from './collection-policy'
+import { scanPolicy, scanNeedsRecycle, type ScanMode } from './collection-policy'
+import { ScanIdentity } from './scan-identity'
 import { readRecovery } from './recovery'
 import type { RuntimeEventInput } from '../shared/runtime-events'
 
@@ -24,12 +26,13 @@ export class CollectionService {
   constructor(
     private readonly db: Pick<Database, 'call'>,
     private readonly engine: Pick<DouyinEngine, 'request' | 'cancel' | 'release' | 'snapshot'> &
-      Partial<Pick<DouyinEngine, 'assertAvailable'>>,
+      Partial<Pick<DouyinEngine, 'assertAvailable' | 'scanSessionKey' | 'scanMemoryMB'>>,
     private readonly run: Runner,
     private readonly identity: (accountId: string, check: () => void) => Promise<Account>,
     private readonly changed: (committed?: boolean) => void,
     private readonly timing: Policy = policy,
-    private readonly report: (accountId: string, event: RuntimeEventInput) => void = () => {}
+    private readonly report: (accountId: string, event: RuntimeEventInput) => void = () => {},
+    private readonly getScanMode: () => Promise<ScanMode> = async () => 'normal'
   ) {}
   get running(): boolean {
     return !!this.loop
@@ -46,11 +49,11 @@ export class CollectionService {
     })
     this.changed()
   }
-  async start(accountId: string, mode: CollectionTask['mode']): Promise<CollectionTask> {
+  async start(accountId: string, mode: CollectionTask['mode'], restart = false): Promise<CollectionTask> {
     if (this.loop) throw new AppError('BUSY', '请先暂停或停止现有采集任务。')
     this.engine.assertAvailable?.(accountId, 'likes')
     const previous = await this.db.call('collection', { accountId })
-    if (mode === 'full' && previous?.mode === 'full' && previous.status !== 'completed')
+    if (!restart && mode === 'full' && previous?.mode === 'full' && previous.status !== 'completed')
       return this.control(accountId, previous.id, 'resume')
     if (mode === 'update' && previous && previous.status !== 'completed')
       return this.control(accountId, previous.id, 'resume')
@@ -109,6 +112,12 @@ export class CollectionService {
     })
   }
   private async collect(initial: CollectionTask, signal: AbortSignal): Promise<void> {
+    let timing: Policy | null = null
+    let mode: ScanMode = 'normal'
+    let slowUntil = 0
+    const identity = new ScanIdentity(this.identity, (accountId) =>
+      mode === 'fast' ? (this.engine.scanSessionKey?.(accountId) ?? null) : null
+    )
     const progress = new PageProgress()
     const ending = new EndConfirmation()
     let traversal = new EmptyPageTraversal(initial.cursor)
@@ -123,9 +132,17 @@ export class CollectionService {
     }
     while (!signal.aborted && task.status === 'running') {
       try {
+        if (!timing) {
+          mode = await this.getScanMode()
+          timing = scanPolicy(this.timing, mode)
+        }
         this.engine.assertAvailable?.(task.accountId, 'likes')
-        const recycled =
-          segmentPages >= this.timing.pagesPerSegment || Date.now() - segmentStart >= this.timing.segmentMs
+        const recycled = scanNeedsRecycle(
+          timing,
+          segmentPages,
+          Date.now() - segmentStart,
+          segmentPages % 32 === 0 ? this.engine.scanMemoryMB?.() : 0
+        )
         if (recycled) {
           this.activity = 'recycling'
           this.changed()
@@ -138,7 +155,8 @@ export class CollectionService {
             },
             true
           )
-          await this.wait(this.timing.cooldown, signal)
+          identity.invalidate()
+          await this.wait(timing.cooldown, signal)
           valid()
           segmentPages = 0
           segmentStart = Date.now()
@@ -156,7 +174,7 @@ export class CollectionService {
             this.activity = 'requesting'
             this.changed()
             try {
-              const account = await this.identity(task.accountId, guard)
+              const account = await identity.get(task.accountId, guard)
               guard()
               const page = parseLikedPage(
                 await this.engine.request(task.accountId, 'likes', {
@@ -165,11 +183,14 @@ export class CollectionService {
                   min_cursor: '0',
                   count: '18',
                   publish_video_strategy_type: '2',
+                  cut_version: '1',
+                  whale_cut_token: '',
                   pc_client_type: '1'
                 }),
                 { allowEmpty: true }
               )
               guard()
+              identity.assertCurrent(task.accountId)
               const confirmed = ending.check(
                 `${task.phase}:${traversal.cursor}`,
                 page.items.map((item) => item.id),
@@ -220,10 +241,17 @@ export class CollectionService {
         segmentPages++
         this.changed()
         if (task.status === 'running')
-          await this.wait(saved ? this.timing.interval : this.timing.retry, signal)
+          await this.wait(
+            saved
+              ? Math.max(timing.interval, Date.now() < slowUntil ? 800 : 0)
+              : readPageDelay(this.activity, timing.interval, this.timing.retry),
+            signal
+          )
       } catch (error) {
         if (signal.aborted) return
         const detail = publicError(error)
+        identity.invalidate()
+        slowUntil = Date.now() + 60_000
         ending.reset()
         traversal = new EmptyPageTraversal(task.cursor)
         const recovery = readRecovery({

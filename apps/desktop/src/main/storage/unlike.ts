@@ -11,6 +11,8 @@ type Method =
   | 'unlikeCreate'
   | 'unlikeUpdate'
   | 'unlikeNext'
+  | 'unlikeBatchNext'
+  | 'unlikeNeedsTypeCheck'
   | 'unlikeReserve'
   | 'unlikeFinish'
   | 'unlikeSkip'
@@ -143,8 +145,19 @@ export class UnlikeStore {
               .get(input.accountId)
           )
             throw new AppError('BUSY', '已有取消点赞或收藏任务正在运行。')
-          const ids = [...new Set<string>(input.workIds)]
-          if (!ids.length || ids.length > MAX_BATCH_SIZE || (input.mode === 'single' && ids.length !== 1))
+          if (input.allLikes && (source !== 'likes' || input.mode !== 'batch'))
+            throw new AppError('INVALID_TARGETS', '全量任务仅用于取消当前账号的全部点赞。')
+          const ids: string[] = input.allLikes
+            ? this.db
+                .prepare('SELECT workId FROM account_items WHERE accountId=? ORDER BY workId')
+                .all(input.accountId)
+                .map((row) => String(row.workId))
+            : [...new Set<string>(input.workIds)]
+          if (
+            !ids.length ||
+            ids.length > (input.allLikes ? 100000 : MAX_BATCH_SIZE) ||
+            (input.mode === 'single' && ids.length !== 1)
+          )
             throw new AppError('INVALID_TARGETS', '单条操作只能选择一条；批量操作一次最多 1000 条。')
           const rows = ids.map((id) => {
             if (
@@ -196,6 +209,24 @@ export class UnlikeStore {
           .prepare('UPDATE unlike_tasks SET status=?,reason=?,errorCode=?,updatedAt=? WHERE id=?')
           .run(input.status, input.reason, input.errorCode ?? null, Date.now(), task.id)
         return this.task(input.accountId, task.id)
+      }
+      case 'unlikeNeedsTypeCheck':
+        this.task(input.accountId, input.taskId)
+        return !!this.db
+          .prepare(
+            "SELECT 1 FROM unlike_items h JOIN unlike_tasks t ON t.id=h.taskId WHERE t.accountId=? AND t.source='likes' AND h.workId=? AND h.status='failed' AND h.errorCode='API_REJECTED' LIMIT 1"
+          )
+          .get(input.accountId, input.workId)
+      case 'unlikeBatchNext': {
+        const task = this.task(input.accountId, input.taskId)!
+        if (task.status !== 'running') return []
+        if (task.mode !== 'batch') throw new AppError('INVALID_INPUT', '平台批量接口仅用于批量任务。')
+        const table = task.source === 'favorites' ? 'saved_items' : 'account_items'
+        return this.db
+          .prepare(
+            `SELECT i.* FROM unlike_items i JOIN ${table} a ON a.accountId=? AND a.workId=i.workId WHERE i.taskId=? AND i.status='pending' ${task.source === 'favorites' ? '' : "AND a.platformSeen=1 AND NOT EXISTS(SELECT 1 FROM unlike_items h JOIN unlike_tasks t ON t.id=h.taskId WHERE t.accountId=a.accountId AND t.source='likes' AND h.workId=i.workId AND h.status='failed' AND h.errorCode='API_REJECTED')"} ORDER BY i.position LIMIT 50`
+          )
+          .all(input.accountId, task.id)
       }
       case 'unlikeNext': {
         const task = this.task(input.accountId, input.taskId)!

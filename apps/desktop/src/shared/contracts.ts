@@ -1,5 +1,6 @@
 import type { HealthSnapshot } from './health'
 import { z } from 'zod'
+import type { SavedGroupLibrary } from './saved-groups'
 import type { RuntimeEvent } from './runtime-events'
 import type { RecoveryState } from './recovery-state'
 import {
@@ -56,6 +57,13 @@ const queueSourceSchema = z.discriminatedUnion('type', [
 ])
 
 export const commands = {
+  scanAudit: z.object({
+    accountId: idSchema,
+    source: z.enum(['likes', 'favorites', 'recommendations', 'detail']),
+    cursor: workIdSchema.default('0'),
+    workId: workIdSchema.optional(),
+    appId: z.enum(['6383', '1128']).default('6383')
+  }),
   snapshot: z.object({}),
   exportMobileLibrary: z.object({ accountId: idSchema, source: z.enum(['likes', 'favorites']).optional() }),
   checkHealth: z.object({ accountId: idSchema }),
@@ -75,7 +83,7 @@ export const commands = {
   collectPage: z.object({ accountId: idSchema, continue: z.boolean() }),
   collectionStart: z.object({
     accountId: idSchema,
-    mode: z.enum(['update', 'incremental', 'recheck', 'like-order'])
+    mode: z.enum(['update', 'incremental', 'recheck', 'like-order', 'restart'])
   }),
   runtimeEvents: z.object({ accountId: idSchema }),
   favoritesStart: z.object({ accountId: idSchema, mode: z.enum(['sync', 'update']).optional() }),
@@ -87,6 +95,16 @@ export const commands = {
     mode: z.enum(['sync', 'update']).optional()
   }),
   favoriteFolders: z.object({ accountId: idSchema }),
+  savedGroupsList: z.object({ accountId: idSchema, kind: z.enum(['mix', 'series', 'recommend']) }),
+  savedGroupsSync: z.object({ accountId: idSchema, kind: z.enum(['mix', 'series', 'recommend']) }),
+  savedGroupsRemove: z.object({
+    accountId: idSchema,
+    kind: z.enum(['mix', 'series', 'recommend']),
+    ids: z.array(workIdSchema).min(1).max(MAX_BATCH_SIZE),
+    excludedFolderIds: z.array(workIdSchema).max(10000).optional()
+  }),
+  savedGroupsStop: z.object({ accountId: idSchema }),
+  favoriteProtectedIds: z.object({ accountId: idSchema, folderIds: z.array(workIdSchema).max(10000) }),
   favoriteStatus: z.object({ accountId: idSchema, workId: workIdSchema }),
   favoriteEditor: playbackScopeSchema.extend({ workId: workIdSchema }),
   favoriteSave: z.object({
@@ -111,19 +129,24 @@ export const commands = {
   stopRequest: z.object({}),
   query: querySchema,
   libraryOverview: z.object({ accountId: idSchema }),
-  matchingIds: filterSchema,
+  matchingIds: filterSchema.extend({
+    excludedFolderIds: z.array(workIdSchema).max(10000).optional(),
+    includedFolderIds: z.array(workIdSchema).max(10000).optional()
+  }),
   deleteLocal: z.object({ accountId: idSchema, workIds: z.array(workIdSchema).min(1).max(100000) }),
   unlikeStart: z.object({
     accountId: idSchema,
     workIds: z.array(workIdSchema).min(1).max(MAX_BATCH_SIZE),
     source: z.enum(['likes', 'favorites']).default('likes'),
+    excludedFolderIds: z.array(workIdSchema).max(10000).optional(),
     mode: z.enum(['single', 'batch'])
   }),
+  unlikeAll: z.object({ accountId: idSchema }),
   unlikeControl: z.object({ accountId: idSchema, taskId: idSchema, action: z.enum(['resume', 'stop']) }),
   unlikeItems: z.object({
     accountId: idSchema,
     taskId: idSchema,
-    offset: z.number().int().min(0).max(1000),
+    offset: z.number().int().min(0).max(100000),
     limit: z.number().int().min(1).max(100).default(50),
     issuesOnly: z.boolean().optional()
   }),
@@ -388,6 +411,10 @@ export interface FavoritesTask {
   updatedAt: number
 }
 export interface Outputs {
+  savedGroupsList: SavedGroupLibrary
+  savedGroupsSync: SavedGroupLibrary
+  savedGroupsRemove: SavedGroupLibrary
+  savedGroupsStop: null
   exportMobileLibrary: { count: number; filePath: string } | null
   appPreferences: AppPreferences
   checkDatabase: { ok: boolean; checkedAt: number; issues: number }
@@ -397,6 +424,7 @@ export interface Outputs {
   favoritesProbe: { stage: string; count: number; skipped: number; hasMore: boolean }
   favoritesControl: FavoritesTask
   favoriteFolders: FavoriteFolder[]
+  favoriteProtectedIds: string[]
   favoriteStatus: { collected: boolean }
   favoriteEditor: FavoriteEditor
   favoriteSave: { collected: true; foldersAdded: number }
@@ -404,6 +432,7 @@ export interface Outputs {
   checkHealth: HealthSnapshot
   collectionAction: null
   snapshot: Snapshot
+  scanAudit: Record<string, unknown>
   createAccount: Account
   switchAccount: null
   renameAccount: Account
@@ -422,6 +451,7 @@ export interface Outputs {
   matchingIds: string[]
   deleteLocal: { removed: number }
   unlikeStart: UnlikeTask
+  unlikeAll: UnlikeTask
   unlikeControl: UnlikeTask
   unlikeItems: { items: UnlikeItem[]; total: number }
   unlikeHistory: UnlikeTask[]

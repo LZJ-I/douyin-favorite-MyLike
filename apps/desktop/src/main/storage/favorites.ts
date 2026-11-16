@@ -3,6 +3,7 @@ import type { FavoritesTask, FavoriteFolder, Work } from '../../shared/contracts
 import { AppError } from '../errors'
 import { randomUUID } from 'node:crypto'
 import { FavoriteState } from './favorite-state'
+import { MAX_EMPTY_PAGE_CURSORS } from '../read-recovery'
 
 export const favoritesMigration = `
 ALTER TABLE playback_queues ADD COLUMN source TEXT NOT NULL DEFAULT 'likes';
@@ -103,6 +104,21 @@ export class FavoritesStore {
         .prepare('SELECT 1 FROM saved_items WHERE accountId=? AND workId=?')
         .get(accountId, workId)
     }
+  }
+  protectedIds(accountId: string, folderIds: string[]): string[] {
+    if (!folderIds.length) return []
+    const task = this.task(accountId)
+    if (task?.status !== 'completed' || task.incomplete || task.skipped || task.foldersDeferred)
+      throw new AppError('FOLDERS_NOT_SYNCED', '请先在收藏页完成“向下采集”，同步全部收藏夹后再排除。')
+    const folders = this.folders(accountId)
+    if (folderIds.some((id) => !folders.some((folder) => folder.id === id)))
+      throw new AppError('FOLDER_CHANGED', '收藏夹列表已变化，请关闭后重新选择。')
+    return this.db
+      .prepare(
+        'SELECT DISTINCT workId FROM saved_members WHERE accountId=? AND folderId IN (SELECT value FROM json_each(?))'
+      )
+      .all(accountId, JSON.stringify(folderIds))
+      .map((row) => String(row.workId))
   }
   private verifyIdentity(accountId: string, remoteId: string): void {
     if (this.db.prepare('SELECT remoteId FROM accounts WHERE id=?').get(accountId)?.remoteId !== remoteId)
@@ -350,7 +366,7 @@ export class FavoritesStore {
       const traversed = input.traversedCursors ?? [input.requestCursor]
       if (
         !traversed.length ||
-        traversed.length > 6 ||
+        traversed.length > MAX_EMPTY_PAGE_CURSORS ||
         traversed[0] !== task.cursor ||
         traversed.at(-1) !== input.requestCursor ||
         new Set(traversed).size !== traversed.length ||
@@ -427,7 +443,7 @@ export class FavoritesStore {
       const traversed = input.traversedCursors ?? [input.requestCursor]
       if (
         !traversed.length ||
-        traversed.length > 6 ||
+        traversed.length > MAX_EMPTY_PAGE_CURSORS ||
         traversed[0] !== task.cursor ||
         traversed.at(-1) !== input.requestCursor ||
         new Set(traversed).size !== traversed.length ||

@@ -112,7 +112,8 @@ export const appPreferencesSchema = z.object({
   zoom: z.union([z.literal(0.9), z.literal(1), z.literal(1.1), z.literal(1.25), z.literal(1.5)]).default(1),
   rememberWindow: z.boolean().default(true),
   motion: z.enum(['system', 'reduce']).default('system'),
-  libraryMode: z.enum(['paged', 'scroll']).default('paged')
+  libraryMode: z.enum(['paged', 'scroll']).default('paged'),
+  scanMode: z.enum(['normal', 'fast']).default('fast')
 })
 export type AppPreferences = z.infer<typeof appPreferencesSchema>
 export const appPreferencesPatchSchema = z.object({
@@ -120,7 +121,8 @@ export const appPreferencesPatchSchema = z.object({
   zoom: appPreferencesSchema.shape.zoom.removeDefault().optional(),
   rememberWindow: appPreferencesSchema.shape.rememberWindow.removeDefault().optional(),
   motion: appPreferencesSchema.shape.motion.removeDefault().optional(),
-  libraryMode: appPreferencesSchema.shape.libraryMode.removeDefault().optional()
+  libraryMode: appPreferencesSchema.shape.libraryMode.removeDefault().optional(),
+  scanMode: appPreferencesSchema.shape.scanMode.removeDefault().optional()
 })
 export interface WindowState {
   x: number

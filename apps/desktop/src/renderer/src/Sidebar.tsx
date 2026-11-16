@@ -5,6 +5,7 @@ import {
   LayoutDashboard,
   Heart,
   Star,
+  ThumbsUp,
   Plus,
   Settings2,
   Sun,
@@ -57,6 +58,7 @@ export function Sidebar({ snapshot, tab, setTab, back, busy, account, setAdding,
             { id: 'dashboard', icon: LayoutDashboard, text: '仪表盘' },
             { id: 'library', icon: Heart, text: '喜欢' },
             { id: 'favorites', icon: Star, text: '收藏' },
+            { id: 'recommendations', icon: ThumbsUp, text: '推荐' },
             { id: 'tasks', icon: Activity, text: '任务' },
             { id: 'settings', icon: Settings2, text: '设置' }
           ] as const

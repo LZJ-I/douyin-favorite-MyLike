@@ -1,4 +1,9 @@
 import { AppError } from './errors'
+// Deleted/unavailable reactions can leave long gaps in the chronological feed.
+// Follow only stable server cursors; keep one shared finite bound at both layers.
+export const MAX_EMPTY_PAGE_CURSORS = 128
+export const readPageDelay = (activity: string | null, interval: number, retry: number) =>
+  activity === 'probing' ? interval : retry
 
 // Shared policy for read-only collection. No remote write uses these retries.
 export const retryableRead = (code: string) =>
@@ -48,7 +53,7 @@ export class EmptyPageTraversal {
       if (++this.changes >= 3) throw new AppError('EMPTY_PAGE', '空页返回游标反复变化，断点未推进。')
       return 'confirm'
     }
-    if (this.cursors.length >= 6)
+    if (this.cursors.length >= MAX_EMPTY_PAGE_CURSORS)
       throw new AppError('EMPTY_PAGE_LIMIT', '连续空页探查达到上限，尚未确认末尾，原断点保留。')
     this.cursors.push(next)
     this.candidate = ''
