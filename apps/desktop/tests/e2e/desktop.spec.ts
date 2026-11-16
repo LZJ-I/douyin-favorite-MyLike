@@ -298,17 +298,17 @@ async function installPlatform(accountId: string, slow?: 'identity' | 'page') {
         }
         if (url.pathname === '/aweme/v1/web/cancel/item/digg/multi/') {
           const form = new URLSearchParams(await request.text())
+          const ids = form.get('aweme_ids')!.split(',')
+          const failed = (globalThis as any).__rejectLikeOnce ? ids.slice(0, 1) : []
           ;((globalThis as any).__bulkLikeWrites ??= []).push({
             method: request.method,
             ids: form.get('aweme_ids')!.split(','),
             types: JSON.parse(form.get('item_type_map')!),
             query: Object.fromEntries(url.searchParams)
           })
-          if ((globalThis as any).__rejectLikeOnce) {
-            ;(globalThis as any).__rejectLikeOnce = false
-            return Response.json({ status_code: 0, fatal_ids: [form.get('aweme_ids')!.split(',')[0]] })
-          }
-          return Response.json({ status_code: 0, fatal_ids: [] })
+          ;(globalThis as any).__rejectLikeOnce = false
+          ;((globalThis as any).__bulkUnlikedIds ??= []).push(...ids.filter((id) => !failed.includes(id)))
+          return Response.json({ status_code: 0, fatal_ids: failed })
         }
         if (url.pathname === '/aweme/v1/web/commit/item/digg/' && (globalThis as any).__typedLikeRetry) {
           const form = new URLSearchParams(await request.text())
@@ -635,6 +635,9 @@ async function installPlatform(accountId: string, slow?: 'identity' | 'page') {
             status_code: 0,
             aweme_detail: {
               aweme_id: detailId,
+              ...((globalThis as any).__bulkUnlikedIds
+                ? { user_digged: (globalThis as any).__bulkUnlikedIds.includes(detailId) ? 0 : 1 }
+                : {}),
               collect_stat: (globalThis as any).__favoriteCollectedWorks?.includes(detailId) ? 1 : 0,
               desc: '测试视频：喜欢的日常',
               create_time: 1_700_000_000,
@@ -6990,6 +6993,12 @@ test('cancels every scanned like through the native all-likes confirmation in du
     .toMatchObject({ status: 'completed', total: 100, success: 100, pending: 0, unknown: 0 })
   const writes = await app.evaluate(() => (globalThis as any).__bulkLikeWrites)
   expect(writes).toHaveLength(2)
+  const verified = await app.evaluate(() =>
+    ((globalThis as any).__mylikeTestCalls as string[])
+      .filter((value) => new URL(value).pathname === '/aweme/v1/web/aweme/detail/')
+      .map((value) => new URL(value).searchParams.get('aweme_id'))
+  )
+  expect(new Set(verified).size).toBe(100)
   expect(
     writes.every(
       (write: any) =>
