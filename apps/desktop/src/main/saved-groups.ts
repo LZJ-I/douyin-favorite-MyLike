@@ -153,6 +153,7 @@ export class SavedGroupsService {
                 check()
                 if (this.stopped) throw new AppError('CANCELLED', '同步已停止。')
                 const page = parseSavedGroups(response, kind)
+                const unavailableOnly = !page.items.length && page.unavailableCount > 0
                 if (
                   page.hasMore &&
                   ((!page.items.length && !page.unavailableCount) ||
@@ -163,14 +164,14 @@ export class SavedGroupsService {
                 if (
                   !ending.check(
                     cursor,
-                    page.unavailableCount
+                    unavailableOnly
                       ? [page.cursor, String(page.unavailableCount)]
                       : page.items.map((i) => i.id),
-                    page.hasMore && !page.unavailableCount
+                    page.hasMore && !unavailableOnly
                   )
                 )
                   return null
-                if (page.unavailableCount && unavailablePages >= MAX_EMPTY_PAGE_CURSORS)
+                if (unavailableOnly && unavailablePages >= MAX_EMPTY_PAGE_CURSORS)
                   throw new AppError(
                     'EMPTY_PAGE_LIMIT',
                     '连续不可见推荐页已达探查上限，未确认末尾，已保留列表和断点。'
@@ -194,7 +195,7 @@ export class SavedGroupsService {
             true
           )
           if (page) {
-            unavailablePages = page.unavailableCount ? unavailablePages + 1 : 0
+            unavailablePages = !page.items.length && page.unavailableCount ? unavailablePages + 1 : 0
             visited.add(cursor)
             cursor = page.cursor
             this.changed()
@@ -264,7 +265,7 @@ export class SavedGroupsService {
         status: this.stopped ? 'stopped' : 'completed',
         reason: this.stopped
           ? '已停止，未发送项保留；不会自动继续。'
-          : `${groupLabels[kind]}${mode === 'sync' ? '列表已同步到平台末尾。' : '取消任务已完成。'}`
+          : `${groupLabels[kind]}${mode === 'sync' ? '已读到网页接口末尾；仅覆盖接口可返回的内容，不能确认账号全部内容已读取。' : '本次所选内容的取消任务已完成，不代表账号已清空。'}`
       })
     } catch (error) {
       try {

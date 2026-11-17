@@ -34,7 +34,7 @@ export function parseSavedGroups(data: Record<string, any>, kind: SavedGroupKind
   if (
     kind === 'recommend' &&
     String(data.status_code) === '0' &&
-    raw === null &&
+    (raw === null || Array.isArray(raw)) &&
     Number.isSafeInteger(data.invalid_item_count) &&
     data.invalid_item_count > 0 &&
     Array.isArray(data.invalid_item_id_list) &&

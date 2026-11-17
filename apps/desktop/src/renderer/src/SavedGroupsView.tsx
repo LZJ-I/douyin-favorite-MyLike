@@ -85,7 +85,13 @@ export function SavedGroupsView({
           <strong>
             本地已同步 {library?.items.length ?? 0} 个{label}
           </strong>
-          <span>{library?.complete ? '已同步到平台末尾' : '尚未同步完整，可继续读取'}</span>
+          <span>
+            {library?.complete ? '已读到网页接口末尾 · 账号完整性未确认' : '尚未读到接口末尾，可继续读取'}
+          </span>
+          {!!library?.unavailableCount && (
+            <span>本轮平台明确标记 {library.unavailableCount} 条记录不可见，未列入可操作视频。</span>
+          )}
+          <span>取消后再次扫描不会找回已取消的内容；无效记录与网页未返回的内容无法在这里批量操作。</span>
         </div>
         <div className="panel-actions">
           <input
@@ -211,7 +217,7 @@ export function SavedGroupsView({
             ? '没有匹配的内容。'
             : library?.complete
               ? recommendation
-                ? '平台未返回你推荐的视频。'
+                ? '网页接口未返回可操作的推荐视频；不能据此确认账号推荐已清空。'
                 : `平台未返回已收藏的${label}。`
               : `点击“读取 / 继续同步”，获取你${recommendation ? '推荐的视频' : `收藏的${label}`}。`}
         </p>

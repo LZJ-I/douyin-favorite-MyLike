@@ -36,6 +36,7 @@ export interface Inputs {
   }
   savedGroupsScope: { accountId: string; taskId: string }
   savedGroupsPage: {
+    unavailableCount?: number
     accountId: string
     taskId: string
     remoteId: string

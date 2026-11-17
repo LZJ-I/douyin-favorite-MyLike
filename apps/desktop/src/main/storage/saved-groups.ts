@@ -4,6 +4,7 @@ import { AppError } from '../errors'
 
 // Additive tables keep the existing works, favorites, account sessions and cursors intact.
 export const savedGroupsSchema = `
+CREATE TABLE IF NOT EXISTS saved_group_page_coverage(accountId TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,kind TEXT NOT NULL,runId TEXT NOT NULL,cursor TEXT NOT NULL,unavailable INTEGER NOT NULL,PRIMARY KEY(accountId,kind,runId,cursor));
 CREATE TABLE IF NOT EXISTS saved_groups(accountId TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,kind TEXT NOT NULL,id TEXT NOT NULL,title TEXT NOT NULL,author TEXT NOT NULL,coverUrl TEXT,episodes INTEGER NOT NULL,seenRun TEXT NOT NULL,PRIMARY KEY(accountId,kind,id));
 CREATE TABLE IF NOT EXISTS saved_group_scans(accountId TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,kind TEXT NOT NULL,runId TEXT NOT NULL,cursor TEXT NOT NULL,complete INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(accountId,kind));
 CREATE TABLE IF NOT EXISTS saved_group_tasks(accountId TEXT PRIMARY KEY REFERENCES accounts(id) ON DELETE CASCADE,id TEXT NOT NULL,kind TEXT NOT NULL,mode TEXT NOT NULL,status TEXT NOT NULL,remoteId TEXT NOT NULL,received INTEGER NOT NULL DEFAULT 0,reason TEXT);
@@ -34,7 +35,7 @@ export class SavedGroupsStore {
           .get(accountId, task.id!)
       : {}
     const scan = this.db
-      .prepare('SELECT cursor,complete FROM saved_group_scans WHERE accountId=? AND kind=?')
+      .prepare('SELECT cursor,complete,runId FROM saved_group_scans WHERE accountId=? AND kind=?')
       .get(accountId, kind)
     return {
       items: this.db
@@ -44,6 +45,13 @@ export class SavedGroupsStore {
         .all(accountId, kind) as unknown as SavedGroup[],
       task: task ? ({ ...task, ...counts } as unknown as SavedGroupTask) : null,
       complete: !!scan?.complete,
+      unavailableCount: Number(
+        this.db
+          .prepare(
+            'SELECT coalesce(sum(unavailable),0) AS n FROM saved_group_page_coverage WHERE accountId=? AND kind=? AND runId=?'
+          )
+          .get(accountId, kind, scan?.runId ?? '')?.n ?? 0
+      ),
       cursor: String(scan?.cursor ?? '0')
     }
   }
@@ -120,6 +128,7 @@ export class SavedGroupsStore {
     }
   }
   page(input: {
+    unavailableCount?: number
     accountId: string
     taskId: string
     remoteId: string
@@ -138,6 +147,14 @@ export class SavedGroupsStore {
         .get(input.accountId, task.kind)!
       if (scan.cursor !== input.requestCursor)
         throw new AppError('CURSOR_STALLED', '合集或短剧断点已变化，未提交旧页面。')
+      const unavailable = input.unavailableCount ?? 0
+      if (!Number.isSafeInteger(unavailable) || unavailable < 0)
+        throw new AppError('INVALID_INPUT', '不可见记录数量无效。')
+      this.db
+        .prepare(
+          'INSERT INTO saved_group_page_coverage VALUES(?,?,?,?,?) ON CONFLICT(accountId,kind,runId,cursor) DO UPDATE SET unavailable=excluded.unavailable'
+        )
+        .run(input.accountId, task.kind, scan.runId!, input.requestCursor, unavailable)
       const insert = this.db.prepare(
         'INSERT INTO saved_groups VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(accountId,kind,id) DO UPDATE SET title=excluded.title,author=excluded.author,coverUrl=excluded.coverUrl,episodes=excluded.episodes,seenRun=excluded.seenRun'
       )
@@ -160,7 +177,16 @@ export class SavedGroupsStore {
       this.db
         .prepare('UPDATE saved_group_tasks SET received=received+? WHERE accountId=?')
         .run(input.items.length, input.accountId)
-      if (!input.hasMore) {
+      const unavailableTotal = Number(
+        this.db
+          .prepare(
+            'SELECT coalesce(sum(unavailable),0) AS n FROM saved_group_page_coverage WHERE accountId=? AND kind=? AND runId=?'
+          )
+          .get(input.accountId, task.kind, scan.runId!)?.n ?? 0
+      )
+      // An unavailable page is not evidence that a previously stored item or
+      // an uncertain cancellation disappeared. Preserve both for verification.
+      if (!input.hasMore && !unavailableTotal) {
         this.db
           .prepare('DELETE FROM saved_groups WHERE accountId=? AND kind=? AND seenRun<>?')
           .run(input.accountId, task.kind, scan.runId!)

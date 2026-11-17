@@ -23,5 +23,6 @@ export interface SavedGroupLibrary {
   task: SavedGroupTask | null
   complete: boolean
   cursor: string
+  unavailableCount?: number
 }
 export const groupLabels = { mix: '合集', series: '短剧', recommend: '推荐视频' } as const

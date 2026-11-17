@@ -107,7 +107,12 @@ export function FavoritesPanel({
             : progress.status === 'completed'
               ? '已完成'
               : progress.status === 'partial'
-                ? '部分完成'
+                ? progress.foldersTotal > 0 &&
+                  progress.foldersDone === progress.foldersTotal &&
+                  !progress.foldersDeferred &&
+                  progress.incomplete === 1
+                  ? '收藏夹接口已遍历 · 全部收藏存在空页，成员完整性待核对'
+                  : '部分完成 · 有收藏夹或条目待复查'
                 : '已停止') +
             ' · 本次新增 ' +
             progress.added +
@@ -133,6 +138,16 @@ export function FavoritesPanel({
       )}
 
       <FavoriteIssues task={task} />
+      {(folders ?? []).some((folder) => folder.localCount < folder.remoteCount) && (
+        <p className="task-error" role="status">
+          收藏夹成员数量尚未对齐：
+          {(folders ?? [])
+            .filter((folder) => folder.localCount < folder.remoteCount)
+            .map((folder) => `${folder.title}（本地 ${folder.localCount} / 平台 ${folder.remoteCount}）`)
+            .join('、')}
+          。接口末尾不能证明成员齐全，数量未对齐的收藏夹暂停用于批量排除。
+        </p>
+      )}
     </section>
   )
 }

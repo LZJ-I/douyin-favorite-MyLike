@@ -198,6 +198,44 @@ it('resumes an interrupted scan without pruning until a trusted end, scoped to a
   expect(library(store, 'mix', 'b').items.map((i) => i.id)).toEqual(['77'])
 })
 
+it('preserves unseen records and uncertain writes when the scan ends with unavailable records', () => {
+  const { store } = setup()
+  seed(store, 'recommend', ['2'])
+  store.call('savedGroupsBegin', {
+    ...scope,
+    taskId: 'remove',
+    kind: 'recommend',
+    mode: 'remove',
+    ids: ['2']
+  })
+  store.call('savedGroupsWrite', { accountId: 'a', taskId: 'remove', id: '2', status: 'sending' })
+  store.call('savedGroupsWrite', { accountId: 'a', taskId: 'remove', id: '2', status: 'unknown' })
+  store.call('savedGroupsBegin', { ...scope, taskId: 'scan', kind: 'recommend', mode: 'sync' })
+  store.call('savedGroupsPage', {
+    ...scope,
+    taskId: 'scan',
+    requestCursor: '0',
+    cursor: '0',
+    hasMore: false,
+    items: [],
+    unavailableCount: 1
+  })
+  expect(library(store, 'recommend')).toMatchObject({
+    complete: true,
+    unavailableCount: 1,
+    items: [{ id: '2' }]
+  })
+  expect(() =>
+    store.call('savedGroupsBegin', {
+      ...scope,
+      taskId: 'retry',
+      kind: 'recommend',
+      mode: 'remove',
+      ids: ['2']
+    })
+  ).toThrow('结果未知')
+})
+
 it('persists unknown in-flight writes on restart and requires a fresh complete scan before a user retry', () => {
   const { store, file } = setup()
   seed(store)
@@ -426,12 +464,17 @@ it('confirms unavailable recommendation gaps and continues to the later visible 
   await service.start('a', 'recommend', 'sync')
   await done()
   expect(calls.map((c) => c.parameters.max_cursor)).toEqual(['0', '0', '18', '18', '36', '36'])
+  expect(library(store, 'recommend').unavailableCount).toBe(4)
   expect(library(store, 'recommend')).toMatchObject({
     complete: true,
     task: { status: 'completed' },
     items: [{ id: '10' }]
   })
   expect(calls.every((c) => c.operation === 'recommendations')).toBe(true)
+  platform.pages = () => ({ status_code: 0, aweme_list: [], has_more: false, max_cursor: '0' })
+  await service.start('a', 'recommend', 'sync')
+  await done()
+  expect(library(store, 'recommend').unavailableCount).toBe(0)
 })
 
 it('preserves recommendation records and checkpoint when an unavailable gap loops', async () => {

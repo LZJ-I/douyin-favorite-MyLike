@@ -54,6 +54,7 @@ function save(
     folders?: { id: string; title: string; remoteCount: number }[]
     cursor?: string
     hasMore?: boolean
+    incomplete?: boolean
   }
 ) {
   return store.call('favoritesSave', {
@@ -118,6 +119,45 @@ it('refuses exclusions for incomplete syncs and missing folders, while allowing 
   expect(() =>
     store.call('matchingIds', { ...query, source: 'favorites', excludedFolderIds: ['8'] })
   ).toThrow('同步全部收藏夹')
+})
+
+it('allows folder protection after clean folder scans even when the global favorites feed has gaps', () => {
+  const { store } = setup()
+  let task = store.call('favoritesStart', { accountId: 'a', id: 'gap-run' })
+  task = save(store, task, { items: [work('1'), work('2')], incomplete: true })
+  task = save(store, task, { folders: [{ id: '8', title: '保留', remoteCount: 1 }] })
+  task = save(store, task, { items: [work('1')] })
+  expect(task).toMatchObject({
+    status: 'partial',
+    incomplete: 1,
+    foldersDone: 1,
+    foldersTotal: 1,
+    foldersDeferred: 0
+  })
+  expect(store.call('favoriteProtectedIds', { accountId: 'a', folderIds: ['8'] })).toEqual(['1'])
+  expect(store.call('matchingIds', { ...query, source: 'favorites', excludedFolderIds: ['8'] })).toEqual([
+    '2'
+  ])
+})
+
+it('still refuses folder protection when the folder member scan itself has gaps', () => {
+  const { store } = setup()
+  let task = store.call('favoritesStart', { accountId: 'a', id: 'member-gap' })
+  task = save(store, task, { items: [work('1')] })
+  task = save(store, task, { folders: [{ id: '8', title: '保留', remoteCount: 1 }] })
+  save(store, task, { items: [work('1')], incomplete: true })
+  expect(() => store.call('favoriteProtectedIds', { accountId: 'a', folderIds: ['8'] })).toThrow()
+})
+
+it('refuses protection when the endpoint ends before the advertised folder member count', () => {
+  const { store } = setup()
+  let task = store.call('favoritesStart', { accountId: 'a', id: 'count-gap' })
+  task = save(store, task, { items: [work('1')] })
+  task = save(store, task, { folders: [{ id: '8', title: '未对齐', remoteCount: 219 }] })
+  save(store, task, { items: [work('1')] })
+  expect(() => store.call('favoriteProtectedIds', { accountId: 'a', folderIds: ['8'] })).toThrow(
+    '平台数量大于本地成员数'
+  )
 })
 
 it('excludes before applying the batch limit, across all pages and with the current search filter', () => {

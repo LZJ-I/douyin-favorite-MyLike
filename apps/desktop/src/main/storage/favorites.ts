@@ -108,11 +108,31 @@ export class FavoritesStore {
   protectedIds(accountId: string, folderIds: string[]): string[] {
     if (!folderIds.length) return []
     const task = this.task(accountId)
-    if (task?.status !== 'completed' || task.incomplete || task.skipped || task.foldersDeferred)
+    if (
+      !task ||
+      !['completed', 'partial'].includes(task.status) ||
+      (task.incomplete ?? 0) & 2 ||
+      task.foldersDeferred ||
+      task.foldersDone !== task.foldersTotal
+    )
       throw new AppError('FOLDERS_NOT_SYNCED', '请先在收藏页完成“向下采集”，同步全部收藏夹后再排除。')
     const folders = this.folders(accountId)
     if (folderIds.some((id) => !folders.some((folder) => folder.id === id)))
       throw new AppError('FOLDER_CHANGED', '收藏夹列表已变化，请关闭后重新选择。')
+    if (folders.some((folder) => folderIds.includes(folder.id) && folder.localCount < folder.remoteCount))
+      throw new AppError(
+        'FOLDERS_NOT_SYNCED',
+        '所选收藏夹的平台数量大于本地成员数，完整性尚未确认，取消操作未发送。'
+      )
+    for (const folderId of folderIds) {
+      const job = this.db
+        .prepare(
+          'SELECT j.completed,m.incomplete,m.deferred FROM saved_jobs j JOIN saved_job_meta m USING(taskId,folderId) WHERE j.taskId=? AND j.folderId=?'
+        )
+        .get(task.id, folderId)
+      if (!job?.completed || job.incomplete || job.deferred)
+        throw new AppError('FOLDERS_NOT_SYNCED', '所选收藏夹成员尚未完整同步，取消操作未发送。')
+    }
     return this.db
       .prepare(
         'SELECT DISTINCT workId FROM saved_members WHERE accountId=? AND folderId IN (SELECT value FROM json_each(?))'
